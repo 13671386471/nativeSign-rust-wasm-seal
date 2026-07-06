@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>点聚版式文档签章引擎 — Rust WASM 重构版</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; }
+        .container { max-width: 1200px; margin: 20px auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #1890ff, #096dd9); color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .header h1 { font-size: 24px; margin-bottom: 8px; }
+        .header p { opacity: 0.85; font-size: 14px; }
+        .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+        .toolbar button { padding: 8px 16px; border: 1px solid #d9d9d9; border-radius: 4px; background: white; cursor: pointer; font-size: 13px; }
+        .toolbar button:hover { border-color: #1890ff; color: #1890ff; }
+        .toolbar button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .doc-container { background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); overflow: hidden; }
+        .doc-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: #fafafa; border-bottom: 1px solid #f0f0f0; }
+        .doc-title { font-size: 14px; font-weight: 500; color: #262626; }
+        .doc-body { position: relative; min-height: 600px; max-height: 800px; background: #ffffff; overflow: auto; }
+        #spinner { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: #999; z-index: 10; }
+        #spinner .loading-icon { font-size: 48px; margin-bottom: 12px; animation: spin 1s linear infinite; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        #screen { position: relative; width: 100%; overflow: visible; background: #ccc; }
+        #status { margin-top: 8px; font-size: 13px; color: #999; }
+        .info-panel { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 16px; }
+        .info-card { background: white; padding: 16px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+        .info-card .label { font-size: 12px; color: #999; margin-bottom: 4px; }
+        .info-card .value { font-size: 18px; font-weight: 600; color: #262626; }
+        .sign-config { background: white; padding: 20px; border-radius: 8px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+        .sign-config h3 { font-size: 16px; margin-bottom: 12px; color: #262626; }
+        .config-row { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+        .config-row label { font-size: 13px; color: #595959; margin-right: 4px; }
+        .config-row select { padding: 4px 8px; border: 1px solid #d9d9d9; border-radius: 4px; }
+        .page-nav { display: flex; align-items: center; gap: 8px; }
+        .page-nav input { width: 50px; padding: 4px 8px; border: 1px solid #d9d9d9; border-radius: 4px; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 头部 -->
+        <div class="header">
+            <h1>点聚版式文档签章引擎</h1>
+            <p>Rust WASM 重构版 · 基于 PDFium 真实渲染 · 支持 PDF/OFD 电子签章</p>
+        </div>
+
+        <!-- 签署配置 -->
+        <div class="sign-config" id="signConfig" style="display:none">
+            <h3>签署参数配置</h3>
+            <div class="config-row">
+                <div>
+                    <label>输出版式:</label>
+                    <select id="fileFormat">
+                        <option value="pdf">PDF</option>
+                        <option value="ofd">OFD</option>
+                    </select>
+                </div>
+                <div>
+                    <label>证书算法:</label>
+                    <select id="algorithm">
+                        <option value="sm2">SM2 (国密)</option>
+                        <option value="rsa">RSA (国际)</option>
+                    </select>
+                </div>
+                <div>
+                    <label>签署方式:</label>
+                    <select id="signMode">
+                        <option value="cloud">云签</option>
+                        <option value="ukey">UKey</option>
+                    </select>
+                </div>
+                <div>
+                    <label>国密章:</label>
+                    <input type="checkbox" id="isSm2Seal">
+                </div>
+                <button onclick="applyConfig()">应用配置</button>
+            </div>
+        </div>
+
+        <!-- 工具栏 -->
+        <div class="toolbar">
+            <button onclick="openFile()" title="打开文件">打开</button>
+            <button onclick="prevPage()" title="上一页">上一页</button>
+            <button onclick="nextPage()" title="下一页">下一页</button>
+            <button onclick="zoomIn()" title="放大">放大 +</button>
+            <button onclick="zoomOut()" title="缩小">缩小 -</button>
+            <button onclick="fitWidth()" title="满宽">满宽</button>
+            <button onclick="saveFile()" title="保存">保存</button>
+            <button onclick="signSeal()" title="签章">签章</button>
+        </div>
+
+        <!-- 信息面板 -->
+        <div class="info-panel">
+            <div class="info-card">
+                <div class="label">文件状态</div>
+                <div class="value" id="infoStatus">初始化…</div>
+            </div>
+            <div class="info-card">
+                <div class="label">总页数</div>
+                <div class="value" id="infoPages">-</div>
+            </div>
+            <div class="info-card">
+                <div class="label">文件大小</div>
+                <div class="value" id="infoSize">-</div>
+            </div>
+            <div class="info-card">
+                <div class="label">签章数</div>
+                <div class="value" id="infoSeals">0</div>
+            </div>
+        </div>
+
+        <!-- 文档显示区 -->
+        <div class="doc-container" style="margin-top: 16px;">
+            <div class="doc-header">
+                <span class="doc-title" id="docTitle">未打开文档</span>
+                <div class="page-nav">
+                    <span style="font-size: 12px; color: #999;">页</span>
+                    <input type="number" id="pageInput" min="1" value="0" onchange="goPage(this.value)" />
+                    <span style="font-size: 12px; color: #999;">/ <span id="totalPages">0</span></span>
+                </div>
+            </div>
+            <div class="doc-body">
+                <div id="spinner">
+                    <div class="loading-icon">⟳</div>
+                    <div>引擎加载中...</div>
+                    <div id="status">正在加载 PDFium WASM 模块…</div>
+                </div>
+                <div id="screen"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ====== 第1步: 加载 PDFium WASM (必须先于 Rust WASM 加载) ====== -->
+    <script>
+        // 状态跟踪
+        window.__pdfiumReady = false;
+        window.__pdfiumModule = null;
+
+        document.getElementById('status').textContent = '正在加载 PDFium 渲染引擎…';
+        console.log('[pdfium] 开始加载 PDFium WASM 模块…');
+    </script>
+    <script src="pdfium.js"></script>
+    <script>
+        // PDFium 加载完成后, pdfium.js 会在全局注册 PDFiumModule() 工厂函数
+        PDFiumModule().then(function(pdfiumModule) {
+            window.__pdfiumModule = pdfiumModule;
+            window.__pdfiumReady = true;
+            console.log('[pdfium] PDFium WASM 模块加载完成');
+            document.getElementById('status').textContent = 'PDFium 就绪, 正在加载签章引擎…';
+
+            // 触发自定义事件, 通知 Rust WASM 加载脚本
+            window.dispatchEvent(new Event('pdfium-ready'));
+        }).catch(function(err) {
+            console.error('[pdfium] PDFium 加载失败:', err);
+            document.getElementById('status').textContent = 'PDFium 加载失败: ' + err.message;
+        });
+    </script>
+
+    <!-- ====== 第2步: 加载 Rust WASM 签章引擎 ====== -->
+    <script type="module">
+        // 等待 PDFium 就绪后再加载 Rust WASM
+        async function waitForPdfium() {
+            if (window.__pdfiumReady) return;
+            return new Promise((resolve) => {
+                if (window.__pdfiumReady) { resolve(); return; }
+                window.addEventListener('pdfium-ready', resolve, { once: true });
+            });
+        }
+
+        async function bootWasm() {
+            try {
+                await waitForPdfium();
+                console.log('[boot] PDFium 已就绪, 开始加载 Rust WASM 引擎');
+
+                const wasmBindings = await import('./pkg/dianju_wasm_seal.js');
+                await wasmBindings.default();
+                console.log('[boot] Rust WASM 引擎加载成功');
+
+                // 关键: 调用 pdfium-render 导出的 initialize_pdfium_render()
+                // 参数1: PDFium 的 Emscripten 模块对象 (由 pdfium.js 加载)
+                // 参数2: 本 Rust WASM 模块对象 (wasm-bindgen 的模块, 传 undefined 即可, pdfium-render 内部会处理)
+                // 参数3: debug — 是否开启详细日志
+                if (typeof wasmBindings.initialize_pdfium_render === 'function') {
+                    const result = wasmBindings.initialize_pdfium_render(
+                        window.__pdfiumModule,
+                        window.__pdfiumModule, // local_wasm_module: pdfium-render 在 wasm-bindgen 模式下不需要自己的 Emscripten Module
+                        false
+                    );
+                    if (result) {
+                        console.log('[boot] PDFium 模块绑定成功');
+                    } else {
+                        console.error('[boot] PDFium 模块绑定失败, PDF 渲染将不可用');
+                    }
+                } else {
+                    console.warn('[boot] initialize_pdfium_render 未找到');
+                }
+
+                wasmBindings.init_application('spinner', 'screen', 'status');
+                console.log('[boot] 引擎初始化完成, 版本:', wasmBindings.version());
+
+                // 加载兼容桥接层
+                const { createOFDPlugin } = await import('./js/ofd_plugin.js');
+                const wasmModule = Object.fromEntries(
+                    Object.entries(wasmBindings)
+                        .filter(([k]) => k !== 'default')
+                );
+
+                window.OFD_Plugin = createOFDPlugin(wasmModule);
+                window._wasmReady = true;
+
+                document.getElementById('infoStatus').textContent = '就绪';
+                console.log('[boot] OFD_Plugin API 就绪');
+
+                if (window._onEngineReady) window._onEngineReady();
+            } catch (error) {
+                console.error('[boot] WASM 加载失败:', error);
+                document.getElementById('status').textContent = '引擎加载失败: ' + error.message;
+            }
+        }
+
+        bootWasm();
+    </script>
+
+    <!-- 应用逻辑 -->
+    <script>
+        let currentFile = null;
+        let totalPages = 0;
+        let currentPage = 0;
+        let isSelectingPoint = false;
+
+        window._onEngineReady = function() {
+            console.log('[app] 引擎就绪, 等待用户操作');
+            bindInteractionEvents();
+        };
+
+        async function getPlugin() {
+            if (!window.OFD_Plugin) {
+                alert('引擎尚未加载完成，请稍候...');
+                throw new Error('引擎未就绪');
+            }
+            return window.OFD_Plugin;
+        }
+
+        function updatePageInfo(page, pages) {
+            currentPage = page;
+            totalPages = pages;
+            document.getElementById('pageInput').value = page + 1;
+            document.getElementById('totalPages').textContent = pages;
+            window.__wasm_current_page = page;
+        }
+
+        async function openFile() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.pdf,.ofd';
+            input.onchange = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                document.getElementById('status').textContent = '正在加载文件...';
+                const plugin = await getPlugin();
+
+                try {
+                    const arrayBuf = await file.arrayBuffer();
+                    const data = new Uint8Array(arrayBuf);
+                    await plugin.LoadFile(data, file.name);
+
+                    const pages = await plugin.GetPageCount();
+                    const size = await plugin.GetCurrFileSize();
+
+                    document.getElementById('docTitle').textContent = file.name;
+                    document.getElementById('infoStatus').textContent = '已打开';
+                    document.getElementById('infoPages').textContent = pages;
+                    document.getElementById('infoSize').textContent = size + ' KB';
+                    document.getElementById('signConfig').style.display = 'block';
+
+                    updatePageInfo(0, pages);
+                    await plugin.SetPageMode(1, 100);
+                } catch (e) {
+                    alert('文件加载失败: ' + e.message);
+                }
+            };
+            input.click();
+        }
+
+        async function nextPage() {
+            if (currentPage + 1 < totalPages) {
+                scrollToPage(currentPage + 1, true);
+            }
+        }
+
+        async function prevPage() {
+            if (currentPage > 0) {
+                scrollToPage(currentPage - 1, true);
+            }
+        }
+
+        async function goPage(val) {
+            const page = parseInt(val, 10) - 1;
+            if (isNaN(page) || page < 0 || page >= totalPages) return;
+            const plugin = await getPlugin();
+            await plugin.SetCurrPage(page);
+            scrollToPage(page, false);
+        }
+
+        async function zoomIn() {
+            const plugin = await getPlugin();
+            await plugin.performClick('view_zoomin');
+        }
+
+        async function zoomOut() {
+            const plugin = await getPlugin();
+            await plugin.performClick('view_zoomout');
+        }
+
+        async function fitWidth() {
+            const plugin = await getPlugin();
+            await plugin.SetPageMode(2, 100);
+        }
+
+        async function saveFile() {
+            const plugin = await getPlugin();
+            const result = await plugin.SaveTo('signed_document', 'pdf', 0);
+            if (result === '1') {
+                alert('文件保存成功!');
+            } else {
+                alert('保存失败');
+            }
+        }
+
+        async function signSeal() {
+            const plugin = await getPlugin();
+            isSelectingPoint = true;
+            const sealImage = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMzAiIHN0cm9rZT0iI0Q4MUUwNiIgc3Ryb2tlLXdpZHRoPSIzIiBmaWxsPSJub25lIi8+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMjIiIHN0cm9rZT0iI0Q4MUUwNiIgc3Ryb2tlLXdpZHRoPSIxIiBmaWxsPSJub25lIi8+PHRleHQgeD0iMzIiIHk9IjM3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmaWxsPSIjRDgxRTA2Ij7lsI/pmo88L3RleHQ+PC9zdmc+';
+            await plugin.SelectPoint(sealImage);
+            alert('请在文档上点击落章位置');
+        }
+
+        // ============================================================
+        // 连续滚动翻页 — 全部页面渲染后, 自然滚动浏览
+        // ============================================================
+
+        function getScrollContainer() {
+            return document.querySelector('.doc-body');
+        }
+
+        /// 获取当前可见的页面索引 (基于滚动位置)
+        function getVisiblePageIndex() {
+            const sc = getScrollContainer();
+            if (!sc) return 0;
+            const containerTop = sc.scrollTop;
+            const containerMid = containerTop + sc.clientHeight / 2;
+
+            // 遍历所有页面 canvas, 找到中点所在的那一页
+            const screen = document.getElementById('screen');
+            if (!screen) return 0;
+            const canvases = screen.querySelectorAll('canvas[data-page]');
+            for (const canvas of canvases) {
+                const pageIdx = parseInt(canvas.getAttribute('data-page'), 10);
+                const top = canvas.offsetTop;
+                const bottom = top + canvas.offsetHeight;
+                if (containerMid >= top && containerMid <= bottom) {
+                    return pageIdx;
+                }
+            }
+            // fallback: 最接近顶部的那页
+            return currentPage;
+        }
+
+        /// 滚动到指定页 (平滑动画)
+        function scrollToPage(pageIdx, smooth) {
+            const screen = document.getElementById('screen');
+            const sc = getScrollContainer();
+            if (!screen || !sc) return;
+
+            const canvas = screen.querySelector(`canvas[data-page="${pageIdx}"]`);
+            if (!canvas) return;
+
+            const targetTop = canvas.offsetTop;
+            if (smooth) {
+                sc.scrollTo({ top: targetTop, behavior: 'smooth' });
+            } else {
+                sc.scrollTop = targetTop;
+            }
+            currentPage = pageIdx;
+            updatePageInfo(pageIdx, totalPages);
+        }
+
+        /// Rust 调用: 所有页面渲染完成后重新绑定
+        window.__wasm_on_pages_rendered = function() {
+            const sc = getScrollContainer();
+            if (sc) {
+                // 渲染后滚动到之前记录的位置 (或顶部)
+                const targetPage = window.__wasm_last_page || 0;
+                scrollToPage(targetPage, false);
+            }
+        };
+
+        /// Rust 调用: 翻页时丝滑滚动到目标页
+        window.__wasm_scroll_to_page = function(page) {
+            window.__wasm_last_page = page;
+            scrollToPage(page, true);
+        };
+
+        function bindInteractionEvents() {
+            const sc = getScrollContainer();
+            if (!sc) return;
+
+            // 滚动时实时更新当前页码指示器
+            sc.addEventListener('scroll', function() {
+                if (isSelectingPoint) return;
+                const vis = getVisiblePageIndex();
+                if (vis !== currentPage) {
+                    currentPage = vis;
+                    document.getElementById('pageInput').value = vis + 1;
+                }
+            }, { passive: true });
+
+            // 键盘: PageDown/PageUp 平滑滚动一页
+            document.addEventListener('keydown', function(e) {
+                if (isSelectingPoint) return;
+                if (e.key === 'PageDown') {
+                    e.preventDefault();
+                    if (currentPage + 1 < totalPages) {
+                        scrollToPage(currentPage + 1, true);
+                    }
+                } else if (e.key === 'PageUp') {
+                    e.preventDefault();
+                    if (currentPage > 0) {
+                        scrollToPage(currentPage - 1, true);
+                    }
+                }
+            });
+        }
+
+        // 落章回调
+        window.SelectPoint = async function(param, id) {
+            try {
+                const obj = JSON.parse(param);
+                const plugin = await getPlugin();
+                const page = await plugin.GetCurrentPage();
+                const rect = document.getElementById('screen').getBoundingClientRect();
+                const pointX = Math.floor((obj.left / rect.width) * 50000);
+                const pointY = Math.floor((obj.top / rect.height) * 50000);
+
+                const cPages = `${page},${pointX},5,5,${pointY},MOCK_SEAL_DATA`;
+                const ret = await plugin.AddSeal(cPages, '', 'AUTO_ADD_SEAL_FROM_PATH');
+                if (ret !== 0) {
+                    document.getElementById('infoSeals').textContent =
+                        parseInt(document.getElementById('infoSeals').textContent || '0') + 1;
+                    alert('落章成功');
+                } else {
+                    alert('落章失败');
+                }
+                isSelectingPoint = false;
+                await plugin.CloseSelectPoint();
+            } catch (e) {
+                console.error('落章处理错误:', e);
+                isSelectingPoint = false;
+            }
+        };
+
+        window.ExitSelectPoint = function() {
+            isSelectingPoint = false;
+        };
+
+        window.PageIndex = function(param, id) {
+            try {
+                const obj = JSON.parse(param);
+                const page = parseInt(obj.index || 0);
+                updatePageInfo(page, totalPages);
+            } catch (e) {
+                console.warn('PageIndex 解析失败:', e);
+            }
+            return JSON.stringify({ end: 1, tips: 'Stop operate!' });
+        };
+    </script>
+</body>
+</html>

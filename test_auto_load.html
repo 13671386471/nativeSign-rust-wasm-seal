@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF 渲染修复测试 — Rust WASM</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; }
+        .container { max-width: 1200px; margin: 20px auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #52c41a, #389e0d); color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .header h1 { font-size: 24px; margin-bottom: 8px; }
+        .header p { opacity: 0.85; font-size: 14px; }
+        .info-panel { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 16px; }
+        .info-card { background: white; padding: 16px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+        .info-card .label { font-size: 12px; color: #999; margin-bottom: 4px; }
+        .info-card .value { font-size: 18px; font-weight: 600; color: #262626; }
+        .doc-container { background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); overflow: hidden; margin-top: 16px; }
+        .doc-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: #fafafa; border-bottom: 1px solid #f0f0f0; }
+        .doc-title { font-size: 14px; font-weight: 500; color: #262626; }
+        .doc-body { position: relative; min-height: 600px; background: #e6f0f5; display: flex; align-items: center; justify-content: center; }
+        #spinner { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: #999; z-index: 10; }
+        #spinner .loading-icon { font-size: 48px; margin-bottom: 12px; animation: spin 1s linear infinite; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        #screen { position: relative; width: 100%; height: 100%; min-height: 600px; }
+        #status { margin-top: 8px; font-size: 13px; color: #999; }
+        .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+        .toolbar button { padding: 8px 16px; border: 1px solid #d9d9d9; border-radius: 4px; background: white; cursor: pointer; font-size: 13px; }
+        .toolbar button:hover { border-color: #52c41a; color: #52c41a; }
+        .note { background: #fffbe6; border: 1px solid #ffe58f; padding: 12px 16px; border-radius: 4px; margin-bottom: 16px; color: #666; font-size: 13px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>PDF 渲染修复测试</h1>
+            <p>自动加载 test_labor_contract.pdf 验证页数和渲染</p>
+        </div>
+
+        <div class="note">
+            <strong>说明:</strong> 本页在引擎就绪后自动加载测试 PDF。如果下方正常显示劳动合同内容，且"总页数"显示为 2，则修复成功。
+        </div>
+
+        <div class="toolbar">
+            <button onclick="reloadTest()" title="重新加载">重新加载测试 PDF</button>
+        </div>
+
+        <div class="info-panel">
+            <div class="info-card">
+                <div class="label">文件状态</div>
+                <div class="value" id="infoStatus">就绪</div>
+            </div>
+            <div class="info-card">
+                <div class="label">总页数</div>
+                <div class="value" id="infoPages">-</div>
+            </div>
+            <div class="info-card">
+                <div class="label">文件大小</div>
+                <div class="value" id="infoSize">-</div>
+            </div>
+            <div class="info-card">
+                <div class="label">签章数</div>
+                <div class="value" id="infoSeals">0</div>
+            </div>
+        </div>
+
+        <div class="doc-container">
+            <div class="doc-header">
+                <span class="doc-title" id="docTitle">未打开文档</span>
+                <span style="font-size: 12px; color: #999;">页 <span id="currentPage">0</span> / <span id="totalPages">0</span></span>
+            </div>
+            <div class="doc-body">
+                <div id="spinner">
+                    <div class="loading-icon">⟳</div>
+                    <div>引擎加载中...</div>
+                    <div id="status">正在初始化 WASM 引擎</div>
+                </div>
+                <div id="screen"></div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { init_application, version as wasmVersion } from './pkg/dianju_wasm_seal.js';
+
+        async function bootWasm() {
+            try {
+                await init();
+                console.log('WASM 引擎加载成功, 版本:', wasmVersion());
+                init_application('spinner', 'screen', 'status');
+
+                const { createOFDPlugin } = await import('./js/ofd_plugin.js');
+                const wasmModule = {
+                    init_application, version: wasmVersion,
+                    ...Object.fromEntries(
+                        Object.entries(await import('./pkg/dianju_wasm_seal.js'))
+                            .filter(([k]) => k !== 'default' && k !== 'init')
+                    )
+                };
+
+                window.OFD_Plugin = createOFDPlugin(wasmModule);
+                window._wasmReady = true;
+                document.getElementById('infoStatus').textContent = '就绪';
+                console.log('OFD_Plugin API 就绪');
+
+                if (window._onEngineReady) window._onEngineReady();
+            } catch (error) {
+                console.error('WASM 加载失败:', error);
+                document.getElementById('status').textContent = '引擎加载失败: ' + error.message;
+            }
+        }
+
+        bootWasm();
+    </script>
+
+    <script>
+        async function getPlugin() {
+            if (!window.OFD_Plugin) {
+                throw new Error('引擎未就绪');
+            }
+            return window.OFD_Plugin;
+        }
+
+        window._onEngineReady = async function() {
+            await loadTestPdf();
+        };
+
+        async function loadTestPdf() {
+            const plugin = await getPlugin();
+            document.getElementById('status').textContent = '正在加载测试 PDF...';
+
+            try {
+                const response = await fetch('test_labor_contract.pdf');
+                if (!response.ok) {
+                    throw new Error('无法获取测试 PDF: ' + response.statusText);
+                }
+                const arrayBuf = await response.arrayBuffer();
+                const data = new Uint8Array(arrayBuf);
+                const fileName = '1.劳动合同（2份）-3.26.pdf';
+
+                await plugin.LoadFile(data, fileName);
+
+                const pages = await plugin.GetPageCount();
+                const size = await plugin.GetCurrFileSize();
+
+                document.getElementById('docTitle').textContent = fileName;
+                document.getElementById('infoStatus').textContent = '已打开';
+                document.getElementById('infoPages').textContent = pages;
+                document.getElementById('totalPages').textContent = pages;
+                document.getElementById('currentPage').textContent = 1;
+                document.getElementById('infoSize').textContent = size + ' KB';
+                document.getElementById('status').textContent = '测试 PDF 加载完成';
+
+                await plugin.SetPageMode(1, 100);
+            } catch (e) {
+                console.error('加载测试 PDF 失败:', e);
+                document.getElementById('status').textContent = '加载失败: ' + e.message;
+            }
+        }
+
+        async function reloadTest() {
+            await loadTestPdf();
+        }
+    </script>
+</body>
+</html>
