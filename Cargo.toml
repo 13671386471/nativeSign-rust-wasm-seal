@@ -68,6 +68,10 @@ futures = "0.3"
 # PDF 渲染引擎 — Rust 绑定 Google PDFium
 pdfium-render = "0.9.2"
 
+# OFD 文档解析 — XML + ZIP
+quick-xml = "0.37"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
 [profile.release]
 opt-level = "s"
 lto = true

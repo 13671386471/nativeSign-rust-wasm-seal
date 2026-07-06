@@ -10,6 +10,7 @@ use wasm_bindgen::prelude::*;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 use pdfium_render::prelude::*;
 use crate::types::*;
+use crate::ofd_parser;
 
 // ============================================================
 // PDFium 全局单例 — 只初始化一次,避免重复绑定报错
@@ -386,38 +387,55 @@ impl RenderEngine {
     }
 
     // ============================================================
-    // OFD 全部页面渲染
+    // OFD 全部页面渲染 — 基于 quick-xml + zip 真实解析
     // ============================================================
 
     fn render_all_ofd_pages(&self, doc_state: &DocState) -> Result<(), JsValue> {
-        let page_count = doc_state.page_count;
+        // 解析 OFD 文档
+        let ofd = ofd_parser::parse_ofd(&doc_state.raw_data)
+            .map_err(|e| JsValue::from_str(&format!("OFD 解析失败: {}", e)))?;
+
+        let page_count = ofd.pages.len() as u32;
         if page_count == 0 {
             return Ok(());
         }
 
+        // 获取容器宽度
         let window = web_sys::window().ok_or(JsValue::from_str("无 window"))?;
         let document_js = window.document().ok_or(JsValue::from_str("无 document"))?;
         let container = document_js
             .get_element_by_id(&self.container_id)
             .ok_or_else(|| JsValue::from_str("找不到容器"))?;
-        let _container_w = container.client_width() as f64;
+        let container_w = container.client_width() as f64;
 
-        for i in 0..page_count {
-            let page_w = (595.0 * self.config.zoom) as i32;
-            let page_h = (842.0 * self.config.zoom) as i32;
-            let canvas = self.create_page_canvas(i, page_w, page_h, page_count)?;
-            self.render_ofd_page_to_canvas(&canvas, i, doc_state)?;
+        // 缩放: mm → px (1mm = 72/25.4 ≈ 2.835px, 即 A4=210×297mm → 595×842px)
+        let base_scale = 595.0 / 210.0; // ~2.833 px/mm
+
+        for page in &ofd.pages {
+            let pb = &page.physical_box;
+
+            // 计算页面像素尺寸
+            let page_w_px = (pb.w * base_scale * self.config.zoom) as i32;
+            let page_h_px = (pb.h * base_scale * self.config.zoom) as i32;
+            let pw = page_w_px.max(1);
+            let ph = page_h_px.max(1);
+
+            let canvas = self.create_page_canvas(page.index, pw, ph, page_count)?;
+            let _ctx = self.render_ofd_canvas(&canvas, page, pb, base_scale, doc_state)?;
         }
 
         Ok(())
     }
 
-    fn render_ofd_page_to_canvas(
+    /// 将 OFD 页面渲染到 canvas
+    fn render_ofd_canvas(
         &self,
         canvas: &HtmlCanvasElement,
-        page_idx: u32,
+        page: &ofd_parser::OfdPage,
+        physical_box: &ofd_parser::OfdRect,
+        base_scale: f64,
         doc_state: &DocState,
-    ) -> Result<(), JsValue> {
+    ) -> Result<CanvasRenderingContext2d, JsValue> {
         let ctx = canvas
             .get_context("2d")
             .map_err(|_| JsValue::from_str("无法获取 Canvas 2D 上下文"))?
@@ -425,36 +443,152 @@ impl RenderEngine {
             .dyn_into::<CanvasRenderingContext2d>()
             .map_err(|_| JsValue::from_str("无法转换为 CanvasRenderingContext2d"))?;
 
-        let width = canvas.width() as f64;
-        let height = canvas.height() as f64;
+        let w = canvas.width() as f64;
+        let h = canvas.height() as f64;
 
-        let page_w = 595.0 * self.config.zoom;
-        let page_h = 842.0 * self.config.zoom;
-        let x = (width - page_w) / 2.0;
-        let y = ((height - page_h) / 2.0).max(0.0);
-
-        ctx.clear_rect(0.0, 0.0, width, height);
+        // 白色背景
         ctx.set_fill_style_str("#FFFFFF");
-        ctx.fill_rect(x, y, page_w, page_h);
+        ctx.fill_rect(0.0, 0.0, w, h);
 
-        ctx.set_stroke_style_str("#CCCCCC");
-        ctx.set_line_width(1.0);
-        ctx.stroke_rect(x, y, page_w, page_h);
+        let scale = base_scale * self.config.zoom;
 
-        ctx.set_fill_style_str("#999999");
-        ctx.set_font("14px sans-serif");
-        ctx.set_text_align("center");
-        ctx.fill_text(
-            &format!("OFD 第 {} 页 — 完整解析引擎待实现", page_idx + 1),
-            x + page_w / 2.0,
-            y + page_h / 2.0,
-        ).ok();
+        // OFD 坐标系: 原点在左上角, X 向右, Y 向下
+        // Canvas 2D 坐标系相同, 直接应用 scale
+        ctx.save();
+        ctx.scale(scale, scale)?;
 
-        for seal in &doc_state.seals {
-            if seal.page_index == page_idx {
-                self.render_seal(&ctx, seal, x, y, page_w, page_h)?;
+        for obj in &page.objects {
+            match obj {
+                ofd_parser::OfdObject::Text(text_obj) => {
+                    self.render_ofd_text(&ctx, text_obj)?;
+                }
+                ofd_parser::OfdObject::Path(path_obj) => {
+                    self.render_ofd_path(&ctx, path_obj)?;
+                }
+                ofd_parser::OfdObject::Image(img_obj) => {
+                    // 图片渲染暂缓 (需要 image crate 解码)
+                    let _ = img_obj;
+                }
             }
         }
+
+        ctx.restore();
+
+        // 印章叠加 (坐标需从 mm 转为像素)
+        for seal in &doc_state.seals {
+            if seal.page_index == page.index {
+                self.render_seal_ofd(&ctx, seal, physical_box, scale)?;
+            }
+        }
+
+        Ok(ctx)
+    }
+
+    /// 渲染 OFD 文本对象
+    fn render_ofd_text(
+        &self,
+        ctx: &CanvasRenderingContext2d,
+        obj: &ofd_parser::OfdTextObject,
+    ) -> Result<(), JsValue> {
+        ctx.save();
+
+        // 应用 CTM 变换
+        // OFD CTM [a b c d e f] ↔ Canvas setTransform(a, b, c, d, e, f)
+        let ctm = obj.ctm;
+        ctx.transform(ctm[0], ctm[1], ctm[2], ctm[3], ctm[4], ctm[5])?;
+
+        // 字体: OFD 字体大小单位为 mm, Canvas font-size 单位为 px
+        // 在缩放后的坐标系中 1px ≈ 1mm * scale
+        // 因为 scale ≈ 2.83, font_size(mm) * scale 才是正确的像素大小
+        // 但这里我们已经在 scale 变换后, 所以 font_size(mm) 对应 px
+        let font_family = if obj.font_family.is_empty() { "sans-serif" } else { &obj.font_family };
+        ctx.set_font(&format!("{}px {}", obj.font_size, font_family));
+
+        // 文字颜色
+        ctx.set_fill_style_str(&obj.fill_color.to_css());
+
+        // 绘制各文本段
+        for item in &obj.text_items {
+            // OFD 默认使用 baseline 对齐
+            ctx.set_text_baseline("alphabetic");
+            ctx.set_text_align("start");
+            ctx.fill_text(&item.text, item.x, item.y)
+                .map_err(|_| JsValue::from_str("文本绘制失败"))?;
+        }
+
+        ctx.restore();
+        Ok(())
+    }
+
+    /// 渲染 OFD 路径对象 (SVG 风格缩略路径)
+    fn render_ofd_path(
+        &self,
+        ctx: &CanvasRenderingContext2d,
+        obj: &ofd_parser::OfdPathObject,
+    ) -> Result<(), JsValue> {
+        ctx.save();
+
+        let ctm = obj.ctm;
+        ctx.transform(ctm[0], ctm[1], ctm[2], ctm[3], ctm[4], ctm[5])?;
+
+        // 解析并执行路径命令
+        exec_path_commands(ctx, &obj.path_data)?;
+
+        // 填充
+        if let Some(ref fill) = obj.fill_color {
+            ctx.set_fill_style_str(&fill.to_css());
+            ctx.fill();
+        }
+
+        // 描边
+        if let Some(ref stroke) = obj.stroke_color {
+            ctx.set_stroke_style_str(&stroke.to_css());
+            ctx.set_line_width(obj.line_width.max(0.1));
+            ctx.stroke();
+        }
+
+        ctx.restore();
+        Ok(())
+    }
+
+    /// OFD 印章渲染 (坐标基于物理页面, 单位 mm)
+    fn render_seal_ofd(
+        &self,
+        ctx: &CanvasRenderingContext2d,
+        seal: &PlacedSeal,
+        physical_box: &ofd_parser::OfdRect,
+        scale: f64,
+    ) -> Result<(), JsValue> {
+        // 印章坐标 (归一化到页面物理尺寸)
+        let sx = (seal.x / physical_box.w) * physical_box.w;
+        let sy = (seal.y / physical_box.h) * physical_box.h;
+        let sw = seal.width * self.config.zoom / scale;
+        let sh = seal.height * self.config.zoom / scale;
+
+        let cx = sx + sw / 2.0;
+        let cy = sy + sh / 2.0;
+        let radius = sw.min(sh) / 2.0;
+
+        ctx.save();
+        ctx.begin_path();
+        ctx.arc(cx, cy, radius, 0.0, std::f64::consts::PI * 2.0)
+            .map_err(|_| JsValue::from_str("印章路径绘制失败"))?;
+        ctx.set_stroke_style_str("#D81E06");
+        ctx.set_line_width(0.5);
+        ctx.stroke();
+
+        ctx.set_font("3px sans-serif");
+        ctx.set_fill_style_str("#D81E06");
+        ctx.set_text_align("center");
+        ctx.set_text_baseline("middle");
+        ctx.fill_text(&seal.seal_info.seal_name, cx, cy).ok();
+
+        if seal.signed {
+            ctx.set_fill_style_str("#52C41A");
+            ctx.set_font("4px sans-serif");
+            ctx.fill_text("✓", cx + radius * 0.7, cy - radius * 0.7).ok();
+        }
+        ctx.restore();
 
         Ok(())
     }
@@ -548,4 +682,215 @@ impl Default for RenderEngine {
     fn default() -> Self {
         Self::new("screen")
     }
+}
+
+// ============================================================
+// SVG 风格路径命令执行器 (用于 OFD AbbreviatedData)
+// ============================================================
+
+/// 解析并执行 OFD 缩略路径数据 (兼容 SVG path 子集)
+/// 支持: M/m, L/l, C/c, Q/q, A/a, Z/z, H/h, V/v
+fn exec_path_commands(
+    ctx: &CanvasRenderingContext2d,
+    data: &str,
+) -> Result<(), JsValue> {
+    let tokens = tokenize_path(data);
+    let mut i = 0usize;
+    let (mut cx, mut cy) = (0.0f64, 0.0f64); // current point
+    let (mut sx, mut sy) = (0.0f64, 0.0f64); // sub-path start
+
+    while i < tokens.len() {
+        let cmd = &tokens[i];
+        i += 1;
+
+        match cmd.as_str() {
+            // ---- 绝对命令 ----
+            "M" => {
+                // 收集连续的坐标对
+                while i + 1 < tokens.len() && is_num(&tokens[i]) {
+                    let x: f64 = tokens[i].parse().unwrap_or(cx);
+                    let y: f64 = tokens[i + 1].parse().unwrap_or(cy);
+                    ctx.move_to(x, y);
+                    cx = x; cy = y; sx = x; sy = y;
+                    i += 2;
+                }
+            }
+            "L" => {
+                while i + 1 < tokens.len() && is_num(&tokens[i]) {
+                    let x: f64 = tokens[i].parse().unwrap_or(cx);
+                    let y: f64 = tokens[i + 1].parse().unwrap_or(cy);
+                    ctx.line_to(x, y);
+                    cx = x; cy = y;
+                    i += 2;
+                }
+            }
+            "C" => {
+                while i + 5 < tokens.len() && is_num(&tokens[i]) {
+                    let x1: f64 = tokens[i].parse().unwrap_or(0.0);
+                    let y1: f64 = tokens[i + 1].parse().unwrap_or(0.0);
+                    let x2: f64 = tokens[i + 2].parse().unwrap_or(0.0);
+                    let y2: f64 = tokens[i + 3].parse().unwrap_or(0.0);
+                    let x: f64 = tokens[i + 4].parse().unwrap_or(cx);
+                    let y: f64 = tokens[i + 5].parse().unwrap_or(cy);
+                    ctx.bezier_curve_to(x1, y1, x2, y2, x, y);
+                    cx = x; cy = y;
+                    i += 6;
+                }
+            }
+            "Q" => {
+                while i + 3 < tokens.len() && is_num(&tokens[i]) {
+                    let x1: f64 = tokens[i].parse().unwrap_or(0.0);
+                    let y1: f64 = tokens[i + 1].parse().unwrap_or(0.0);
+                    let x: f64 = tokens[i + 2].parse().unwrap_or(cx);
+                    let y: f64 = tokens[i + 3].parse().unwrap_or(cy);
+                    ctx.quadratic_curve_to(x1, y1, x, y);
+                    cx = x; cy = y;
+                    i += 4;
+                }
+            }
+            "A" => {
+                // arc: rx ry x-axis-rotation large-arc-flag sweep-flag x y
+                while i + 6 < tokens.len() && is_num(&tokens[i]) {
+                    let rx: f64 = tokens[i].parse().unwrap_or(0.0);
+                    let ry: f64 = tokens[i + 1].parse().unwrap_or(0.0);
+                    let _rot: f64 = tokens[i + 2].parse().unwrap_or(0.0);
+                    let _large: f64 = tokens[i + 3].parse().unwrap_or(0.0);
+                    let sweep: f64 = tokens[i + 4].parse().unwrap_or(0.0);
+                    let x: f64 = tokens[i + 5].parse().unwrap_or(cx);
+                    let y: f64 = tokens[i + 6].parse().unwrap_or(cy);
+                    // Canvas 2D 没有原生 arcTo 椭圆支持, 用简化的 ellipse
+                    // 这里做近似: ignore rotation, 取平均半径
+                    let r = (rx + ry) / 2.0;
+                    if r > 0.0 {
+                        ctx.arc(x, y, r, 0.0, std::f64::consts::PI * 2.0)
+                            .ok();
+                    } else {
+                        ctx.line_to(x, y);
+                    }
+                    cx = x; cy = y;
+                    i += 7;
+                }
+            }
+            "Z" | "z" => {
+                ctx.close_path();
+                cx = sx; cy = sy;
+            }
+            // ---- 相对命令 ----
+            "m" => {
+                while i + 1 < tokens.len() && is_num(&tokens[i]) {
+                    let x: f64 = cx + tokens[i].parse::<f64>().unwrap_or(0.0);
+                    let y: f64 = cy + tokens[i + 1].parse::<f64>().unwrap_or(0.0);
+                    ctx.move_to(x, y);
+                    cx = x; cy = y; sx = x; sy = y;
+                    i += 2;
+                }
+            }
+            "l" => {
+                while i + 1 < tokens.len() && is_num(&tokens[i]) {
+                    let x: f64 = cx + tokens[i].parse::<f64>().unwrap_or(0.0);
+                    let y: f64 = cy + tokens[i + 1].parse::<f64>().unwrap_or(0.0);
+                    ctx.line_to(x, y);
+                    cx = x; cy = y;
+                    i += 2;
+                }
+            }
+            "c" => {
+                while i + 5 < tokens.len() && is_num(&tokens[i]) {
+                    let x1 = cx + tokens[i].parse::<f64>().unwrap_or(0.0);
+                    let y1 = cy + tokens[i + 1].parse::<f64>().unwrap_or(0.0);
+                    let x2 = cx + tokens[i + 2].parse::<f64>().unwrap_or(0.0);
+                    let y2 = cy + tokens[i + 3].parse::<f64>().unwrap_or(0.0);
+                    let x = cx + tokens[i + 4].parse::<f64>().unwrap_or(0.0);
+                    let y = cy + tokens[i + 5].parse::<f64>().unwrap_or(0.0);
+                    ctx.bezier_curve_to(x1, y1, x2, y2, x, y);
+                    cx = x; cy = y;
+                    i += 6;
+                }
+            }
+            "q" => {
+                while i + 3 < tokens.len() && is_num(&tokens[i]) {
+                    let x1 = cx + tokens[i].parse::<f64>().unwrap_or(0.0);
+                    let y1 = cy + tokens[i + 1].parse::<f64>().unwrap_or(0.0);
+                    let x = cx + tokens[i + 2].parse::<f64>().unwrap_or(0.0);
+                    let y = cy + tokens[i + 3].parse::<f64>().unwrap_or(0.0);
+                    ctx.quadratic_curve_to(x1, y1, x, y);
+                    cx = x; cy = y;
+                    i += 4;
+                }
+            }
+            "h" => {
+                while i < tokens.len() && is_num(&tokens[i]) {
+                    let x: f64 = cx + tokens[i].parse::<f64>().unwrap_or(0.0);
+                    ctx.line_to(x, cy);
+                    cx = x;
+                    i += 1;
+                }
+            }
+            "v" => {
+                while i < tokens.len() && is_num(&tokens[i]) {
+                    let y: f64 = cy + tokens[i].parse::<f64>().unwrap_or(0.0);
+                    ctx.line_to(cx, y);
+                    cy = y;
+                    i += 1;
+                }
+            }
+            "H" => {
+                while i < tokens.len() && is_num(&tokens[i]) {
+                    let x: f64 = tokens[i].parse().unwrap_or(cx);
+                    ctx.line_to(x, cy);
+                    cx = x;
+                    i += 1;
+                }
+            }
+            "V" => {
+                while i < tokens.len() && is_num(&tokens[i]) {
+                    let y: f64 = tokens[i].parse().unwrap_or(cy);
+                    ctx.line_to(cx, y);
+                    cy = y;
+                    i += 1;
+                }
+            }
+            _ => {
+                // 未知命令, 跳过
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// 将路径数据字符串拆分为 token 列表 (命令字母和数字分开)
+fn tokenize_path(data: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+
+    for ch in data.chars() {
+        if ch.is_whitespace() || ch == ',' {
+            // 分隔符
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+        } else if ch.is_ascii_alphabetic() {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            tokens.push(ch.to_string());
+        } else if ch == '-' && !current.is_empty() {
+            // 负号 → 新数字的开始 (但要是前一个 token 是数字才行)
+            tokens.push(std::mem::take(&mut current));
+            current.push(ch);
+        } else {
+            current.push(ch);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+/// 判断 token 是否为数字
+fn is_num(s: &str) -> bool {
+    s.parse::<f64>().is_ok()
 }

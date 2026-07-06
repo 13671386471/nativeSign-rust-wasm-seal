@@ -33,6 +33,7 @@ mod sign;
 mod ukey;
 mod render;
 mod utils;
+mod ofd_parser;
 
 use wasm_bindgen::prelude::*;
 use std::cell::RefCell;

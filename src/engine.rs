@@ -106,40 +106,10 @@ impl DocumentEngine {
 
     /// 解析 OFD 文档获取页数等信息
     fn parse_ofd_info(&self, data: &[u8]) -> Result<u32, String> {
-        // OFD 是一个 ZIP 压缩包，内部包含 XML 文件
-        // 使用自定义简单 ZIP 解析器
-        use std::io::Cursor;
-        let cursor = Cursor::new(data.to_vec());
-        match zip::ZipArchive::new(cursor) {
-            Ok(mut archive) => {
-                for i in 0..archive.len() {
-                    let content = match archive.by_index(i) {
-                        Ok(raw) => String::from_utf8_lossy(&raw).to_string(),
-                        Err(_) => continue,
-                    };
-                    // 解析 Page 节点数量
-                    let page_count = content.matches("<ofd:Page ").count() as u32
-                        + content.matches("<Page ").count() as u32;
-                    if page_count > 0 {
-                        return Ok(page_count);
-                    }
-                }
-            }
-            Err(_) => {
-                // ZIP 解析失败，回退到文本搜索方式
-            }
-        }
-
-        // 回退: 直接在原始数据中搜索 OFD 页签名
-        let text = String::from_utf8_lossy(data);
-        let page_count = text.matches("<ofd:Page ").count() as u32
-            + text.matches("<Page ").count() as u32;
-        if page_count > 0 {
-            return Ok(page_count.max(1));
-        }
-
-        // 默认1页
-        Ok(1)
+        // 使用真实的 OFD ZIP + XML 解析器
+        let doc = crate::ofd_parser::parse_ofd(data)?;
+        let count = doc.pages.len() as u32;
+        Ok(count.max(1))
     }
 
     /// 获取当前文档总页数
@@ -232,40 +202,6 @@ impl DocumentEngine {
             }
         }
         Err(format!("未找到印章: {}", note_id))
-    }
-}
-
-// ============================================================
-// 简单 ZIP 解压实现（用于 OFD 解析）
-// ============================================================
-mod zip {
-    use std::io::Cursor;
-
-    /// 最小的 ZIP 读取器 — 仅用于读取 OFD 内部 XML
-    pub struct ZipArchive {
-        entries: Vec<ZipEntry>,
-    }
-
-    pub struct ZipEntry {
-        pub name: String,
-        pub offset: u64,
-        pub size: u64,
-        pub compressed_size: u64,
-    }
-
-    impl ZipArchive {
-        pub fn new(_reader: Cursor<Vec<u8>>) -> Result<Self, String> {
-            // 简化实现：对于 OFD 文档，使用 flate2 逐文件解压
-            Err("请使用完整的 ZIP 库解析 OFD".to_string())
-        }
-
-        pub fn len(&self) -> usize {
-            self.entries.len()
-        }
-
-        pub fn by_index(&mut self, _index: usize) -> Result<Vec<u8>, String> {
-            Err("未实现".to_string())
-        }
     }
 }
 

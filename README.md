@@ -1,3 +1,11 @@
+如果你想继续推进，可以按这个顺序：
+
+修复 parse_pdf_info() — 用 PDFium 解析后的 document.pages().len() 获取真实页数（5分钟）
+实现 OFD 真实渲染 — 基于 quick-xml + zip 解析 OFD 文档模型，Canvas 2D 渲染文字/图片/图形（大工程）
+实现真实签章嵌入 — 构造 SES 签章结构体，写入 OFD 签章页/签章描述（需要 GB/T 33190 标准细节）
+国密算法真实现 — 接入 sm2/sm3/sm4 Rust crate，替换 crypto.rs 中的假实现
+
+
 ```
 rust-wasm-seal/
 ├── Cargo.toml              # 依赖配置 (wasm-bindgen, libsm, serde, etc.)
