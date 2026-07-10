@@ -1,57 +1,101 @@
 import sys
-import fitz  # PyMuPDF
 from pypdf import PdfReader
-from pathlib import Path
+from pypdf.generic import IndirectObject, DictionaryObject, ArrayObject
 
-pdf_path = r"D:/工作文档/1.劳动合同（2份）-3.26.pdf"
+def resolve(o):
+    if isinstance(o, IndirectObject):
+        return o.get_object()
+    return o
 
-print("=== PDF 结构分析 ===")
-print(f"文件: {pdf_path}")
-print(f"文件大小: {Path(pdf_path).stat().st_size} bytes")
+def walk_resources(res, out, depth=0):
+    res = resolve(res)
+    if not isinstance(res, DictionaryObject):
+        return
+    # Fonts
+    fonts = resolve(res.get("/Font"))
+    if fonts:
+        for k, v in resolve(fonts).items():
+            f = resolve(v)
+            subtype = f.get("/Subtype")
+            base = f.get("/BaseFont")
+            # embedded?
+            embedded = False
+            fd = f.get("/FontDescriptor")
+            if fd:
+                fd = resolve(fd)
+                for ef in ("/FontFile", "/FontFile2", "/FontFile3"):
+                    if fd.get(ef):
+                        embedded = True
+            out.append(f"  Font {k}: Subtype={subtype} BaseFont={base} Embedded={embedded}")
+    # XObjects
+    xobjs = resolve(res.get("/XObject"))
+    if xobjs:
+        for k, v in resolve(xobjs).items():
+            x = resolve(v)
+            st = x.get("/Subtype")
+            if st == "/Image":
+                filt = x.get("/Filter")
+                cs = x.get("/ColorSpace")
+                w = x.get("/Width"); h = x.get("/Height")
+                out.append(f"  XObject {k}: Image Filter={filt} ColorSpace={cs} {w}x{h}")
+            elif st == "/Form":
+                out.append(f"  XObject {k}: Form (nested)")
+                ws = resolve(x.get("/Resources"))
+                if ws:
+                    walk_resources(ws, out, depth+1)
+    # ExtGState (transparency / blend modes)
+    gs = resolve(res.get("/ExtGState"))
+    if gs:
+        for k, v in resolve(gs).items():
+            g = resolve(v)
+            bm = g.get("/BM"); ca = g.get("/ca"); CA = g.get("/CA")
+            if bm or ca is not None or CA is not None:
+                out.append(f"  ExtGState {k}: BM={bm} ca={ca} CA={CA}")
+    # OCG
+    oc = resolve(res.get("/Properties"))
+    if oc:
+        for k, v in resolve(oc).items():
+            o = resolve(v)
+            if o.get("/Type") == "/OCG":
+                out.append(f"  OCG {k}: {o.get('/Name')}")
 
-# PyMuPDF
-print("\n--- PyMuPDF 分析 ---")
-doc = fitz.open(pdf_path)
-print(f"总页数: {doc.page_count}")
-print(f"PDF 版本: {doc.metadata.get('format', 'unknown')}")
-print(f"标题: {doc.metadata.get('title', '')}")
-print(f"作者: {doc.metadata.get('author', '')}")
-print(f"创建工具: {doc.metadata.get('creator', '')}")
-print(f"Producer: {doc.metadata.get('producer', '')}")
+def analyze(path):
+    print("="*70)
+    print("FILE:", path)
+    print("="*70)
+    try:
+        r = PdfReader(path)
+    except Exception as e:
+        print("  ERROR reading:", e)
+        return
+    print("Encrypted:", r.is_encrypted)
+    print("Page count:", len(r.pages))
+    for i, page in enumerate(r.pages):
+        p = page.get("/Page") if False else page
+        mb = p.mediabox
+        rot = p.get("/Rotate")
+        out = []
+        out.append(f"--- Page {i} ---")
+        out.append(f"  MediaBox: {mb}  Rotate: {rot}")
+        # transparency group?
+        grp = p.get("/Group")
+        if grp:
+            grp = resolve(grp)
+            out.append(f"  Page Group: /S={grp.get('/S')} /CS={grp.get('/CS')} /K={grp.get('/K')}")
+        res = p.get("/Resources")
+        if res:
+            walk_resources(res, out)
+        else:
+            out.append("  (no /Resources)")
+        # text presence
+        try:
+            txt = page.extract_text() or ""
+            out.append(f"  Extracted text length: {len(txt)}  preview: {txt[:60]!r}")
+        except Exception as e:
+            out.append(f"  text extract error: {e}")
+        print("\n".join(out))
+    print()
 
-for i in range(doc.page_count):
-    page = doc[i]
-    rect = page.rect
-    print(f"\n第 {i+1} 页:")
-    print(f"  尺寸: {rect.width} x {rect.height} pt")
-    print(f"  旋转: {page.rotation}°")
-    print(f"  文本字数: {len(page.get_text())}")
-    print(f"  图片数量: {len(page.get_images())}")
-    # 输出前200字符文本
-    text = page.get_text()[:200].replace('\n', '\\n')
-    print(f"  文本片段: {text}...")
-
-# pypdf
-print("\n--- pypdf 分析 ---")
-reader = PdfReader(pdf_path)
-print(f"总页数: {len(reader.pages)}")
-print(f"PDF 版本: {reader.pdf_header}")
-
-# 原始 PDF 文本扫描（用于理解 parse_pdf_info 的缺陷）
-print("\n--- 原始文本扫描 ---")
-raw = Path(pdf_path).read_bytes()
-text = raw.decode('latin-1', errors='ignore')
-count_matches = text.count('/Count')
-print(f"/Count 出现次数: {count_matches}")
-for idx in range(count_matches):
-    pos = text.find('/Count', idx)
-    if pos == -1:
-        break
-    snippet = text[pos:pos+50]
-    print(f"  位置 {pos}: {snippet}")
-
-print("\n--- /Type /Page 统计 ---")
-print(f"/Type /Page 出现次数: {text.count('/Type /Page')}")
-print(f"/Type/Page 出现次数: {text.count('/Type/Page')}")
-
-doc.close()
+if __name__ == "__main__":
+    for p in sys.argv[1:]:
+        analyze(p)

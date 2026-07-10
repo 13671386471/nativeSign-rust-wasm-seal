@@ -132,6 +132,10 @@ function createOFDPlugin(wasmModule) {
     return mod.get_signatures_count(sealType);
   }
 
+  async function GetSealInfoJson() {
+    return mod.get_seal_info_json();
+  }
+
   async function GetNextNote(nodeType, index, param) {
     return mod.get_next_note(nodeType, index, param);
   }
@@ -391,6 +395,7 @@ function createOFDPlugin(wasmModule) {
     SaveTo,
     CloseDoc,
     getSignaturesCount,
+    GetSealInfoJson,
     GetNextNote,
     DeleteNote,
 

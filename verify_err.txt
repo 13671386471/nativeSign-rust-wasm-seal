@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "D:\workspace\self\rust-wasm-seal\tools\compare_extract.py", line 43, in <module>
+    print(f"{label}: 页数={d['n']} CJK={d['cjk']} 奇数hex警告={d['warn']} 首文本={repr(d['first'])}")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'gbk' codec can't encode character '\ufa08' in position 86: illegal multibyte sequence

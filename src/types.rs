@@ -75,6 +75,33 @@ pub struct SealInfo {
     pub seal_start_time: Option<String>,
     #[serde(rename = "sealEndTime")]
     pub seal_end_time: Option<String>,
+    /// 签名者名称（如 "张三"）
+    #[serde(rename = "signerName")]
+    pub signer_name: Option<String>,
+    /// 签名时间
+    #[serde(rename = "signTime")]
+    pub sign_time: Option<String>,
+    /// 签名方法（如 "Adobe.PPKMS / adbe.pkcs7.sha1"）
+    #[serde(rename = "signMethod")]
+    pub sign_method: Option<String>,
+    /// 签章证书颁发者
+    #[serde(rename = "certIssuer")]
+    pub cert_issuer: Option<String>,
+    /// 签章证书主题 DN
+    #[serde(rename = "certSubject")]
+    pub cert_subject: Option<String>,
+    /// 签章证书起始时间
+    #[serde(rename = "certStartTime")]
+    pub cert_start_time: Option<String>,
+    /// 签章证书终止时间
+    #[serde(rename = "certEndTime")]
+    pub cert_end_time: Option<String>,
+    /// 签章证书算法标识
+    #[serde(rename = "certAlgorithm")]
+    pub cert_algorithm: Option<String>,
+    /// 签章证书数据 (base64)
+    #[serde(rename = "certData")]
+    pub cert_data: Option<String>,
 }
 
 /// 文档状态

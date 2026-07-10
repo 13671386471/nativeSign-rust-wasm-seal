@@ -22,7 +22,16 @@ static PDFIUM_INIT: std::sync::Once = std::sync::Once::new();
 fn get_pdfium() -> Result<&'static Pdfium, JsValue> {
     unsafe {
         PDFIUM_INIT.call_once(|| {
-            PDFIUM = Some(Pdfium::default());
+            // 注意: 中文字体提供器不再通过 pdfium-render 的 set_custom_font_provider() 注册。
+            // 原因: 该 API 会把 Rust wasm 模块的 extern "C" 函数指针(即本模块的函数表索引)
+            // 直接传给 PDFium 的 FPDF_SetSystemFontInfo, 但 PDFium 运行在独立的 wasm 模块
+            // (pdfium.js) 中, 无法跨模块调用这些指针, 导致字体映射时触发 wasm trap → panic。
+            // 正确的做法由 JS 端 installChineseFontProvider() 完成: 它把字体回调打补丁到
+            // PDFium 自身的函数表中(与 pdfium-render 处理文件回调的机制一致), 从而支持跨模块。
+            // 此处仅初始化 PDFium 实例即可。
+            web_sys::console::log_1(&"[render] PDFium 实例初始化 (字体提供器由 JS 端安装)".into());
+            let pdfium = Pdfium::default();
+            PDFIUM = Some(pdfium);
         });
         PDFIUM.as_ref()
             .ok_or_else(|| JsValue::from_str("PDFium 初始化失败"))
@@ -219,15 +228,24 @@ impl RenderEngine {
 
     /// 一次性渲染全部 PDF 页面 — 每个页面一个 canvas, 垂直堆叠
     fn render_all_pdf_pages(&self, doc_state: &DocState) -> Result<(), JsValue> {
+        web_sys::console::log_1(&format!("[render_pdf] START raw_data_len={}", doc_state.raw_data.len()).into());
+
         let pdfium = get_pdfium()?;
+        web_sys::console::log_1(&format!("[render_pdf] PDFium instance obtained").into());
 
         // 只加载一次 PDF
         let document = pdfium
             .load_pdf_from_byte_vec(doc_state.raw_data.clone(), None)
-            .map_err(|e| JsValue::from_str(&format!("PDF 加载失败: {}", e)))?;
+            .map_err(|e| {
+                web_sys::console::log_1(&format!("[render_pdf] PDF 加载失败: {}", e).into());
+                JsValue::from_str(&format!("PDF 加载失败: {}", e))
+            })?;
+        web_sys::console::log_1(&format!("[render_pdf] PDF loaded successfully").into());
 
         let page_count = document.pages().len() as u32;
+        web_sys::console::log_1(&format!("[render_pdf] page_count={}", page_count).into());
         if page_count == 0 {
+            web_sys::console::log_1(&"[render_pdf] page_count=0, returning early".into());
             return Ok(());
         }
 
@@ -239,6 +257,7 @@ impl RenderEngine {
             .ok_or_else(|| JsValue::from_str(&format!("找不到容器 #{}", self.container_id)))?;
         let container_w = container.client_width() as f64;
         let container_h_for_fit = (container.client_height() as f64).max(600.0);
+        web_sys::console::log_1(&format!("[render_pdf] container_w={} container_h={}", container_w, container_h_for_fit).into());
 
         // 预计算每页的渲染尺寸
         let mut page_sizes: Vec<(f64, f64, i32, i32)> = Vec::new();
@@ -247,6 +266,7 @@ impl RenderEngine {
                 let pw = page.width().value as f64;
                 let ph = page.height().value as f64;
                 let (tw, th) = self.calc_render_size(pw, ph, container_w, container_h_for_fit);
+                web_sys::console::log_1(&format!("[render_pdf] page[{}] pdf_size={:.1}x{:.1} → target={}x{}", i, pw, ph, tw, th).into());
                 page_sizes.push((pw, ph, tw, th));
             }
         }
@@ -259,9 +279,12 @@ impl RenderEngine {
             let page = document.pages().get(i as i32)
                 .map_err(|e| JsValue::from_str(&format!("页面 {} 不存在: {}", i, e)))?;
 
+            web_sys::console::log_1(&format!("[render_pdf] rendering page[{}] target={}x{}", i, target_w, target_h).into());
             self.render_page_to_canvas(&page, &canvas, target_w, target_h, i, doc_state)?;
+            web_sys::console::log_1(&format!("[render_pdf] page[{}] done", i).into());
         }
 
+        web_sys::console::log_1(&format!("[render_pdf] ALL {} pages rendered", page_count).into());
         Ok(())
     }
 
@@ -326,6 +349,8 @@ impl RenderEngine {
         page_idx: u32,
         doc_state: &DocState,
     ) -> Result<(), JsValue> {
+        web_sys::console::log_1(&format!("[render_page] page[{}] target={}x{}", page_idx, target_w, target_h).into());
+
         let render_cfg = PdfRenderConfig::new()
             .set_target_width(target_w)
             .set_maximum_height(target_h * 2)
@@ -333,11 +358,53 @@ impl RenderEngine {
 
         let bitmap = page
             .render_with_config(&render_cfg)
-            .map_err(|e| JsValue::from_str(&format!("页面 {} 渲染失败: {:?}", page_idx, e)))?;
+            .map_err(|e| {
+                web_sys::console::log_1(&format!("[render_page] page[{}] render_with_config FAILED: {:?}", page_idx, e).into());
+                JsValue::from_str(&format!("页面 {} 渲染失败: {:?}", page_idx, e))
+            })?;
 
-        let image_data: ImageData = bitmap
+        let bmp_w = bitmap.width() as u32;
+        let bmp_h = bitmap.height() as u32;
+        web_sys::console::log_1(&format!("[render_page] page[{}] bitmap rendered, size={}x{}", page_idx, bmp_w, bmp_h).into());
+
+        // 诊断: 统计非白色像素, 用于确认文字是否真的被渲染 (字体是否生效)
+        let rgba = bitmap.as_rgba_bytes();
+        let expected = bmp_w as usize * bmp_h as usize * 4;
+        let non_white = rgba
+            .chunks(4)
+            .filter(|px| px.len() == 4 && (px[0] != 255 || px[1] != 255 || px[2] != 255))
+            .count();
+        web_sys::console::log_1(&format!(
+            "[render_page] page[{}] non_white_pixels={} (rgba_len={}, expected={})",
+            page_idx, non_white, rgba.len(), expected
+        ).into());
+        if non_white == 0 {
+            web_sys::console::warn_1(&format!(
+                "[render_page] page[{}] 位图全白! 若文档含文字, 请检查字体提供器是否生效",
+                page_idx
+            ).into());
+        }
+
+        // 转换为 ImageData 并直接绘制到 canvas
+        // (pdfium-render 的 as_image_data 内部已做 BGRA→RGBA 转换与 stride 处理)
+        let image_data = bitmap
             .as_image_data()
-            .map_err(|e| JsValue::from_str(&format!("ImageData 转换失败: {:?}", e)))?;
+            .map_err(|e| {
+                web_sys::console::log_1(&format!("[render_page] page[{}] as_image_data FAILED: {:?}", page_idx, e).into());
+                JsValue::from_str(&format!("ImageData 转换失败: {:?}", e))
+            })?;
+
+        // 将 canvas 尺寸调整为 bitmap 实际尺寸, 避免 put_image_data 因尺寸不匹配而裁剪/报错
+        canvas.set_width(bmp_w);
+        canvas.set_height(bmp_h);
+        let margin_bottom = if page_idx + 1 < doc_state.page_count { PAGE_GAP } else { 0 };
+        canvas.set_attribute(
+            "style",
+            &format!(
+                "display: block; margin: 0 auto {}px auto; width: {}px; height: {}px;",
+                margin_bottom, bmp_w, bmp_h
+            ),
+        )?;
 
         let ctx = canvas
             .get_context("2d")
@@ -346,20 +413,17 @@ impl RenderEngine {
             .dyn_into::<CanvasRenderingContext2d>()
             .map_err(|_| JsValue::from_str("无法转换为 CanvasRenderingContext2d"))?;
 
-        // 白色背景
-        ctx.set_fill_style_str("#FFFFFF");
-        ctx.fill_rect(0.0, 0.0, target_w as f64, target_h as f64);
-
-        // 绘制页面图像
         ctx.put_image_data(&image_data, 0.0, 0.0)
-            .map_err(|_| JsValue::from_str("ImageData 绑定到 Canvas 失败"))?;
+            .map_err(|e| {
+                web_sys::console::log_1(&format!("[render_page] page[{}] put_image_data FAILED: {:?}", page_idx, e).into());
+                JsValue::from_str(&format!("ImageData 绘制到 Canvas 失败: {:?}", e))
+            })?;
+        web_sys::console::log_1(&format!("[render_page] page[{}] put_image_data OK", page_idx).into());
 
         // 印章叠加
-        let img_w = image_data.width() as f64;
-        let img_h = image_data.height() as f64;
         for seal in &doc_state.seals {
             if seal.page_index == page_idx {
-                self.render_seal(&ctx, seal, 0.0, 0.0, img_w, img_h)?;
+                self.render_seal(&ctx, seal, 0.0, 0.0, bmp_w as f64, bmp_h as f64)?;
             }
         }
 
@@ -391,11 +455,18 @@ impl RenderEngine {
     // ============================================================
 
     fn render_all_ofd_pages(&self, doc_state: &DocState) -> Result<(), JsValue> {
+        web_sys::console::log_1(&format!("[render] render_all_ofd_pages called, doc_type={:?}, raw_data_len={}",
+            doc_state.doc_type, doc_state.raw_data.len()).into());
+
         // 解析 OFD 文档
         let ofd = ofd_parser::parse_ofd(&doc_state.raw_data)
-            .map_err(|e| JsValue::from_str(&format!("OFD 解析失败: {}", e)))?;
+            .map_err(|e| {
+                web_sys::console::log_1(&format!("[render] OFD 解析失败: {}", e).into());
+                JsValue::from_str(&format!("OFD 解析失败: {}", e))
+            })?;
 
         let page_count = ofd.pages.len() as u32;
+        web_sys::console::log_1(&format!("[render] OFD parsed: {} pages", page_count).into());
         if page_count == 0 {
             return Ok(());
         }
@@ -420,8 +491,10 @@ impl RenderEngine {
             let pw = page_w_px.max(1);
             let ph = page_h_px.max(1);
 
-            let canvas = self.create_page_canvas(page.index, pw, ph, page_count)?;
-            let _ctx = self.render_ofd_canvas(&canvas, page, pb, base_scale, doc_state)?;
+        let canvas = self.create_page_canvas(page.index, pw, ph, page_count)?;
+        web_sys::console::log_1(&format!("[render] rendering page[{}] canvas={}x{} scale={:.3}",
+            page.index, pw, ph, base_scale * self.config.zoom).into());
+        let _ctx = self.render_ofd_canvas(&canvas, page, pb, base_scale, doc_state)?;
         }
 
         Ok(())
@@ -460,7 +533,7 @@ impl RenderEngine {
         for obj in &page.objects {
             match obj {
                 ofd_parser::OfdObject::Text(text_obj) => {
-                    self.render_ofd_text(&ctx, text_obj)?;
+                    self.render_ofd_text(&ctx, text_obj, scale)?;
                 }
                 ofd_parser::OfdObject::Path(path_obj) => {
                     self.render_ofd_path(&ctx, path_obj)?;
@@ -489,7 +562,21 @@ impl RenderEngine {
         &self,
         ctx: &CanvasRenderingContext2d,
         obj: &ofd_parser::OfdTextObject,
+        scale: f64,
     ) -> Result<(), JsValue> {
+        // 只记录前3个文本对象的调试信息
+        static mut LOG_COUNT: u32 = 0;
+        unsafe {
+            if LOG_COUNT < 3 {
+                web_sys::console::log_1(&format!("[render_text] font={} size={}mm→{}px items={} text[0]={:?}",
+                    obj.font_family, obj.font_size, obj.font_size * scale,
+                    obj.text_items.len(),
+                    obj.text_items.get(0).map(|t| t.text.clone()).unwrap_or_default()
+                ).into());
+                LOG_COUNT += 1;
+            }
+        }
+
         ctx.save();
 
         // 应用 CTM 变换
@@ -497,12 +584,12 @@ impl RenderEngine {
         let ctm = obj.ctm;
         ctx.transform(ctm[0], ctm[1], ctm[2], ctm[3], ctm[4], ctm[5])?;
 
-        // 字体: OFD 字体大小单位为 mm, Canvas font-size 单位为 px
-        // 在缩放后的坐标系中 1px ≈ 1mm * scale
-        // 因为 scale ≈ 2.83, font_size(mm) * scale 才是正确的像素大小
-        // 但这里我们已经在 scale 变换后, 所以 font_size(mm) 对应 px
+        // 字体: OFD 字体大小单位为 mm
+        // Canvas set_font 的 font-size 单位是 CSS 像素, 不受 ctx.scale() 变换影响
+        // 因此需要手动乘以 scale 将 mm 转为屏幕像素: screen_px = font_size_mm * scale
         let font_family = if obj.font_family.is_empty() { "sans-serif" } else { &obj.font_family };
-        ctx.set_font(&format!("{}px {}", obj.font_size, font_family));
+        let screen_font_size = obj.font_size * scale;
+        ctx.set_font(&format!("{}px {}", screen_font_size, font_family));
 
         // 文字颜色
         ctx.set_fill_style_str(&obj.fill_color.to_css());

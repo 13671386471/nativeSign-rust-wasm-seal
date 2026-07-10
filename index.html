@@ -35,6 +35,40 @@
         .config-row select { padding: 4px 8px; border: 1px solid #d9d9d9; border-radius: 4px; }
         .page-nav { display: flex; align-items: center; gap: 8px; }
         .page-nav input { width: 50px; padding: 4px 8px; border: 1px solid #d9d9d9; border-radius: 4px; text-align: center; }
+        /* ---- 右键菜单 ---- */
+        #sealContextMenu { display: none; position: fixed; z-index: 99999; background: white; border: 1px solid #e8e8e8; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); min-width: 120px; overflow: hidden; }
+        #sealContextMenu .menu-item { padding: 10px 18px; font-size: 14px; color: #262626; cursor: pointer; display: flex; align-items: center; gap: 8px; transition: background 0.15s; }
+        #sealContextMenu .menu-item:hover { background: #f5f5f5; }
+        #sealContextMenu .menu-item .icon { font-size: 16px; }
+        #sealContextMenu .menu-divider { height: 1px; background: #f0f0f0; margin: 0; }
+        /* ---- 模态弹框 ---- */
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.45); z-index: 100000; justify-content: center; align-items: center; }
+        .modal-overlay.active { display: flex; }
+        .modal-box { background: white; border-radius: 8px; box-shadow: 0 6px 30px rgba(0,0,0,0.15); min-width: 380px; max-width: 520px; max-height: 80vh; overflow-y: auto; }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid #f0f0f0; }
+        .modal-header h3 { font-size: 16px; color: #262626; margin: 0; }
+        .modal-close { width: 28px; height: 28px; border: none; background: #f5f5f5; border-radius: 50%; cursor: pointer; font-size: 16px; color: #999; display: flex; align-items: center; justify-content: center; }
+        .modal-close:hover { background: #e8e8e8; color: #595959; }
+        .modal-body { padding: 20px; }
+        .modal-footer { padding: 12px 20px; border-top: 1px solid #f0f0f0; text-align: right; }
+        .modal-footer button { padding: 6px 20px; border: 1px solid #d9d9d9; border-radius: 4px; background: white; cursor: pointer; font-size: 13px; }
+        .modal-footer button:hover { border-color: #1890ff; color: #1890ff; }
+        /* 验证结果样式 */
+        .verify-status { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+        .verify-icon { width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 22px; }
+        .verify-icon.pass { background: #f6ffed; color: #52c41a; }
+        .verify-icon.fail { background: #fff2f0; color: #ff4d4f; }
+        .verify-icon.warn { background: #fffbe6; color: #faad14; }
+        .verify-detail { font-size: 13px; color: #595959; line-height: 1.8; }
+        .verify-detail .row { display: flex; padding: 4px 0; }
+        .verify-detail .row .label { width: 90px; color: #999; flex-shrink: 0; }
+        .verify-detail .row .value { color: #262626; word-break: break-all; }
+        /* 属性表格 */
+        .prop-table { width: 100%; font-size: 13px; }
+        .prop-table tr { border-bottom: 1px solid #f5f5f5; }
+        .prop-table td { padding: 8px 4px; }
+        .prop-table td:first-child { color: #999; width: 90px; vertical-align: top; }
+        .prop-table td:last-child { color: #262626; word-break: break-all; }
     </style>
 </head>
 <body>
@@ -128,6 +162,47 @@
                 </div>
                 <div id="screen"></div>
             </div>
+            <!-- 字体提供器调试面板 (仅用于排查中文渲染问题) -->
+            <div id="fontDebug" style="position:fixed; left:8px; bottom:8px; max-width:360px; max-height:42vh; overflow:auto; background:rgba(0,0,0,0.82); color:#9f9; font:11px/1.4 monospace; padding:8px 10px; border-radius:6px; z-index:99999; white-space:pre-wrap; display:none;"></div>
+        </div>
+    </div>
+
+    <!-- 右键菜单 -->
+    <div id="sealContextMenu">
+        <div class="menu-item" onclick="verifySeal()"><span class="icon">🔍</span> 验证</div>
+        <div class="menu-divider"></div>
+        <div class="menu-item" onclick="showSealProperties()"><span class="icon">📋</span> 属性</div>
+    </div>
+
+    <!-- 验证结果弹框 -->
+    <div class="modal-overlay" id="verifyModal">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3>签章验证结果</h3>
+                <button class="modal-close" onclick="closeModal('verifyModal')">✕</button>
+            </div>
+            <div class="modal-body" id="verifyBody">
+                <!-- 动态内容 -->
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeModal('verifyModal')">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 签章属性弹框 -->
+    <div class="modal-overlay" id="propertyModal">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3>电子签章信息</h3>
+                <button class="modal-close" onclick="closeModal('propertyModal')">✕</button>
+            </div>
+            <div class="modal-body" id="propertyBody">
+                <!-- 动态内容 -->
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeModal('propertyModal')">关闭</button>
+            </div>
         </div>
     </div>
 
@@ -168,24 +243,330 @@
             });
         }
 
+        // 带超时的 fetch — 防止某些 CDN (如 raw.githubusercontent.com) 被墙后
+        // 请求永久挂起, 导致页面一直卡在"加载资源中"
+        function fetchWithTimeout(url, timeoutMs = 10000) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
+            return fetch(url, { signal: controller.signal, mode: 'cors' })
+                .finally(() => clearTimeout(timer));
+        }
+
+        // 字体提供器调试面板 — 把关键事件显示在页面左下角, 方便确认提供器是否被 PDFium 调用
+        const __fontStats = { install: 'pending', mapFont: 0, getFontData: 0, getFontDataFail: 0, lastMap: '', lastGetData: '' };
+        function fontDebug(msg) {
+            console.log('[font] ' + msg);
+            const el = document.getElementById('fontDebug');
+            if (el) {
+                el.style.display = 'block';
+                el.textContent = '[字体提供器调试]\n' +
+                    '安装状态: ' + __fontStats.install + '\n' +
+                    'MapFont 调用: ' + __fontStats.mapFont + '\n' +
+                    'GetFontData 调用: ' + __fontStats.getFontData + ' (失败 ' + __fontStats.getFontDataFail + ')\n' +
+                    '末次 MapFont: ' + __fontStats.lastMap + '\n' +
+                    '末次 GetFontData: ' + __fontStats.lastGetData + '\n' +
+                    '--- 最近事件 ---\n' + msg;
+            }
+        }
+
+        // ============================================================
+        // 跨模块中文字体提供器
+        // ------------------------------------------------------------
+        // pdfium-render 的 set_custom_font_provider() 会把 Rust wasm 模块的 extern "C"
+        // 函数指针(本模块函数表索引)直接传给 PDFium 的 FPDF_SetSystemFontInfo。由于 PDFium
+        // 运行在独立的 wasm 模块(pdfium.js)中, 无法跨模块调用这些指针, 字体映射时会触发
+        // wasm trap → panic。因此这里改为由 JS 直接安装提供器:
+        //   1. 从 PDFium 模块获取其间接函数表 (多类型 funcref 表)
+        //   2. 为每个字体回调(Release/MapFont/GetFont/GetFontData/GetFaceName/
+        //      GetFontCharset/DeleteFont)寻找"形参个数匹配"的表入口并打补丁
+        //      (call_indirect 要求补丁入口形参与回调签名一致, 否则会 trap)
+        //   3. 构造 FPDF_SYSFONTINFO 结构(置于 PDFium 堆中), 各回调字段填入补丁后的表索引
+        //   4. 调用 FPDF_SetSystemFontInfo 注册
+        // 整个流程包在 try/catch 中, 任何异常都不会导致程序崩溃(最坏情况: 中文仍空白)。
+        // ============================================================
+        window.__fontProviderInstalled = false;
+
+        function installChineseFontProvider() {
+            if (window.__fontProviderInstalled) return;
+            const mod = window.__pdfiumModule;
+            if (!mod) { __fontStats.install = '失败: PDFium 模块未就绪'; fontDebug('PDFium 模块未就绪, 跳过字体提供器'); return; }
+            const bytes = window.__customFontBytes;
+            if (!bytes || bytes.length === 0) { __fontStats.install = '失败: 无字体数据'; fontDebug('无字体数据, 跳过字体提供器'); return; }
+
+            try {
+                // 1. 获取 PDFium 的间接函数表 (WebAssembly.Table)
+                //    注意: 本构建(含 V5407+)的 pdfium.js 不再导出全局 wasmTable 运行时方法,
+                //    直接访问 mod.wasmTable 会触发 Aborted('wasmTable' was not exported...)。
+                //    正确的获取路径 (与 pdfium-render 的 bind_to_pdfium 一致):
+                //      mod.wasmExports.__indirect_function_table  (Module['wasmExports'] 已导出)
+                //      或回退 mod.__indirect_function_table / mod.asm.__indirect_function_table
+                let table = null;
+                const tableGetters = [
+                    () => mod.wasmExports && mod.wasmExports.__indirect_function_table,
+                    () => mod.__indirect_function_table,
+                    () => mod.asm && mod.asm.__indirect_function_table,
+                ];
+                for (const get of tableGetters) {
+                    try {
+                        const t = get();
+                        // WebAssembly.Table 的 .length 是 number 属性 (非 function);
+                        // 用 instanceof 或 .get 方法存在性来识别
+                        if (t && (t instanceof WebAssembly.Table || (typeof t.length === 'number' && typeof t.get === 'function'))) {
+                            table = t;
+                            fontDebug('获取到函数表: ' + (t instanceof WebAssembly.Table ? 'WebAssembly.Table(原生)' : 'table-like') + ' length=' + t.length);
+                            break;
+                        } else if (t) {
+                            fontDebug('getter 返回了对象但不是 Table: type=' + typeof t.length + ' hasGet=' + (typeof t.get));
+                        }
+                    } catch (e) { fontDebug('getter 异常: ' + e.message); }
+                }
+                if (!table) { __fontStats.install = '失败: 无法获取函数表'; fontDebug('所有 getter 均无法获取 PDFium 函数表, 跳过字体提供器'); return; }
+                fontDebug('✅ 函数表就绪, 长度=' + table.length);
+
+                const M = mod; // 回调运行在 PDFium 上下文, 操作其堆
+                const fontHandles = new Map();
+                let nextHandle = 1;
+
+                function readCStr(ptr) {
+                    if (!ptr) return '';
+                    const heap = M.HEAPU8;
+                    let s = '', i = ptr;
+                    while (i < heap.length && heap[i] !== 0) { s += String.fromCharCode(heap[i]); i++; }
+                    return s;
+                }
+
+                // 从 sfnt/OTF 字体字节中提取指定表 (table tag 如 'CFF ' / 'cmap')
+                // 用于响应 PDFium 对单个字体表的请求 (table != 0 的情况)
+                function extractTable(bytes, tag) {
+                    if (!bytes || bytes.length < 12) return null;
+                    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+                    const numTables = dv.getUint16(4, false);
+                    let off = 12;
+                    for (let i = 0; i < numTables; i++) {
+                        let t = '';
+                        for (let j = 0; j < 4; j++) t += String.fromCharCode(dv.getUint8(off + j));
+                        const tOff = dv.getUint32(off + 8, false);
+                        const tLen = dv.getUint32(off + 12, false);
+                        if (t === tag) {
+                            return bytes.subarray(tOff, tOff + tLen);
+                        }
+                        off += 16;
+                    }
+                    return null;
+                }
+
+                // 返回中文字体数据。本引擎面向中文版式文档, 对未嵌入的 CID/CJK 字体一律用
+                // 已加载的中文字体兜底, 确保中文可渲染 (嵌入字体如 Helvetica 不会走到这里)。
+                function lookupFont(faceName, charset) {
+                    const lower = (faceName || '').toLowerCase();
+                    const CJK_CHARSET = (charset === 128 || charset === 129 || charset === 134 || charset === 136);
+                    const cjkName = /song|hei|kai|cjk|gb|cn|chinese|ming|fang|sc|tc/.test(lower);
+                    const anyCJK = window.__customFontBytes && (CJK_CHARSET || cjkName || !faceName);
+                    if (anyCJK) {
+                        return window.__customFontBytes;
+                    }
+                    return null;
+                }
+
+                // --- 7 个字体回调: 形参个数必须与 FPDF_SYSFONTINFO 签名严格一致 ---
+                //     PDFium 通过 call_indirect 调用这些表入口, 要求入口类型(形参个数)匹配,
+                //     否则会触发 wasm trap。因此每个回调都显式声明对应数量的命名参数。
+                // Release(pThis) -> void
+                function cbRelease(pThis) { /* 无需操作 */ }
+                // MapFont(pThis, weight, italic, charset, pitch_family, face, bExact) -> void*
+                // 注意: 形参顺序必须与 pdfium/release/include/fpdf_sysfontinfo.h 严格一致!
+                // 头文件定义: (pThis, weight, bItalic, charset, pitch_family, face, bExact)
+                function cbMapFont(pThis, weight, italic, charset, pitch_family, face, bExact) {
+                    const faceName = readCStr(face);
+                    const cs = charset | 0;
+                    const data = lookupFont(faceName, cs);
+                    if (!data) {
+                        fontDebug('MapFont 无匹配字体: "' + faceName + '" charset=' + cs + ' → 返回 0');
+                        return 0;
+                    }
+                    const handle = nextHandle++;
+                    fontHandles.set(handle, { face: faceName || 'CJK', bytes: data, charset: cs });
+                    // 告知 PDFium 这是精确匹配 (bExact 为 int* 指针)
+                    if (bExact) { try { M.HEAPU32[(bExact) >> 2] = 1; } catch (e) {} }
+                    __fontStats.mapFont++;
+                    __fontStats.lastMap = handle + ':"' + (faceName || 'CJK') + '" cs=' + cs + ' len=' + data.length;
+                    fontDebug('MapFont 命中: "' + (faceName || 'CJK') + '" → handle=' + handle + ' len=' + data.length);
+                    return handle;
+                }
+                // GetFont(pThis, face) -> void*
+                function cbGetFont(pThis, face) { return 0; }
+                // GetFontData(pThis, hFont, table, buffer, bufSize) -> ulong
+                function cbGetFontData(pThis, hFont, tableId, buffer, bufSize) {
+                    const rec = fontHandles.get(hFont | 0);
+                    if (!rec) { __fontStats.getFontDataFail++; __fontStats.lastGetData = 'hFont=' + (hFont|0) + ' 未找到'; return 0; }
+                    const data = rec.bytes;
+                    let out;
+                    if (tableId | 0) {
+                        // PDFium 请求单个表 (如 'CFF ')。把 4 字节 tag 解出后提取对应表。
+                        const tag = String.fromCharCode(
+                            (tableId >>> 24) & 0xff, (tableId >>> 16) & 0xff,
+                            (tableId >>> 8) & 0xff, tableId & 0xff
+                        );
+                        out = extractTable(data, tag);
+                        if (!out) { __fontStats.getFontDataFail++; __fontStats.lastGetData = 'table=' + tag + ' 不存在'; return 0; }
+                    } else {
+                        out = data; // 完整字体文件
+                    }
+                    if (buffer && bufSize >= out.length) {
+                        M.HEAPU8.set(out, buffer);
+                    }
+                    __fontStats.getFontData++;
+                    __fontStats.lastGetData = (tableId ? ('table=' + String.fromCharCode((tableId>>>24)&0xff,(tableId>>>16)&0xff,(tableId>>>8)&0xff,tableId&0xff)) : 'whole') + ' len=' + out.length;
+                    return out.length;
+                }
+                // GetFaceName(pThis, hFont, buffer, bufSize) -> ulong
+                function cbGetFaceName(pThis, hFont, buffer, bufSize) {
+                    const rec = fontHandles.get(hFont | 0);
+                    if (!rec) { __fontStats.getFontDataFail++; return 0; }
+                    const arr = new TextEncoder().encode((rec.face || 'CJK') + '\0');
+                    if (buffer && bufSize >= arr.length) M.HEAPU8.set(arr, buffer);
+                    return arr.length;
+                }
+                // GetFontCharset(pThis, hFont) -> int
+                function cbGetFontCharset(pThis, hFont) {
+                    const rec = fontHandles.get(hFont | 0);
+                    return rec ? rec.charset : 0;
+                }
+                // DeleteFont(pThis, hFont) -> void
+                function cbDeleteFont(pThis, hFont) {
+                    fontHandles.delete(hFont | 0);
+                }
+
+                // 回调定义: 名称 / 函数 / 形参个数
+                const cbDefs = [
+                    { name: 'Release',       fn: cbRelease,      arity: 1 },
+                    { name: 'MapFont',       fn: cbMapFont,      arity: 7 },
+                    { name: 'GetFont',       fn: cbGetFont,      arity: 2 },
+                    { name: 'GetFontData',   fn: cbGetFontData,  arity: 5 },
+                    { name: 'GetFaceName',   fn: cbGetFaceName,  arity: 4 },
+                    { name: 'GetFontCharset', fn: cbGetFontCharset, arity: 2 },
+                    { name: 'DeleteFont',    fn: cbDeleteFont,   arity: 2 },
+                ];
+
+                // 2. 为 7 个回调分配函数表入口
+                //    注意: WebAssembly.Table 的 .length 是 number 属性, 不是方法, 不能加 ()。
+                //
+                //    首选 Emscripten 导出的 Module.addFunction(fn, sig): 它把 JS 回调编译为
+                //    "带正确类型签名"的 wasm 包装函数并放入函数表, 返回表索引。这是最可靠方式,
+                //    彻底避免"把裸 JS 函数塞进 funcref 表" 在 call_indirect 时的类型不匹配 trap。
+                //    签名格式: 首字符为返回类型(i=i32/指针, v=void), 其后各字符为参数类型(均 i32)。
+                const idxMap = {};
+                let mode = 'none';
+                const sigMap = {
+                    Release:        'vi',        // void  (pThis)
+                    MapFont:        'iiiiiiii',  // ptr   (pThis, weight, italic, charset, pitch, face, bExact)
+                    GetFont:        'iii',       // ptr   (pThis, face)
+                    GetFontData:    'iiiiii',    // ulong (pThis, hFont, table, buffer, bufSize)
+                    GetFaceName:    'iiiii',     // ulong (pThis, hFont, buffer, bufSize)
+                    GetFontCharset: 'iii',       // int   (pThis, hFont)
+                    DeleteFont:     'vii',       // void  (pThis, hFont)
+                };
+
+                if (typeof mod.addFunction === 'function') {
+                    try {
+                        for (const def of cbDefs) {
+                            idxMap[def.name] = mod.addFunction(def.fn, sigMap[def.name]);
+                        }
+                        mode = 'addFunction';
+                        fontDebug('✅ 用 addFunction 分配入口: ' + JSON.stringify(idxMap));
+                    } catch (afErr) {
+                        mode = 'none';
+                        for (const k in idxMap) delete idxMap[k];
+                        fontDebug('addFunction 失败, 回退手动扩容: ' + afErr.message);
+                    }
+                }
+
+                if (mode === 'none') {
+                    // 回退: 手动扩容函数表(末尾追加新入口, 不覆盖任何已有函数)
+                    try {
+                        const oldLen = table.length;           // 属性, 非方法
+                        table.grow(cbDefs.length);             // funcref 表默认以 null 填充
+                        for (let i = 0; i < cbDefs.length; i++) {
+                            table.set(oldLen + i, cbDefs[i].fn);
+                            idxMap[cbDefs[i].name] = oldLen + i;
+                        }
+                        mode = 'grow';
+                        fontDebug('函数表扩容成功: ' + JSON.stringify(idxMap));
+                    } catch (growErr) {
+                        fontDebug('⚠️ 函数表扩容失败: ' + growErr.message);
+                    }
+                }
+
+                if (mode === 'none' || Object.keys(idxMap).length < cbDefs.length) {
+                    __fontStats.install = '失败: 无法分配函数表入口';
+                    fontDebug('无法为字体回调分配函数表入口, 跳过');
+                    return;
+                }
+
+                // 3. 构造 FPDF_SYSFONTINFO (version 2): 9 个 i32 字段
+                //    [version, Release, EnumFonts, MapFont, GetFont, GetFontData, GetFaceName, GetFontCharset, DeleteFont]
+                const SIZE = 9 * 4;
+                const ptr = mod._malloc(SIZE);
+                if (!ptr) { __fontStats.install = '失败: 分配结构失败'; fontDebug('分配字体信息结构失败'); return; }
+                const heap = mod.HEAPU32;
+                const sbase = ptr / 4;
+                heap[sbase + 0] = 2;                              // version
+                heap[sbase + 1] = idxMap['Release'] || 0;         // Release
+                heap[sbase + 2] = 0;                              // EnumFonts (v2 未使用)
+                heap[sbase + 3] = idxMap['MapFont'] || 0;         // MapFont
+                heap[sbase + 4] = idxMap['GetFont'] || 0;         // GetFont
+                heap[sbase + 5] = idxMap['GetFontData'] || 0;     // GetFontData
+                heap[sbase + 6] = idxMap['GetFaceName'] || 0;     // GetFaceName
+                heap[sbase + 7] = idxMap['GetFontCharset'] || 0;  // GetFontCharset
+                heap[sbase + 8] = idxMap['DeleteFont'] || 0;      // DeleteFont
+
+                // 4. 注册到 PDFium
+                //    FPDF_SetSystemFontInfo 在本构建中已导出, 可直接 ccall 注册。
+                //    ⚠️ 切勿调用 FPDF_GetSystemFontInfo 做"读回验证": 该函数在当前 PDFium WASM
+                //    构建中并未导出, ccall 会触发 Emscripten 的 abort(), 永久置 ABORT=true 并
+                //    reject 模块 readyPromise, 导致后续所有 PDFium 调用(加载/渲染)都以
+                //    "Aborted(Cannot call unknown function FPDF_GetSystemFontInfo...)" 失败。
+                //    安装是否生效交由实际渲染结果判断, 不再做无法完成的读回验证。
+                if (typeof mod['_FPDF_SetSystemFontInfo'] === 'function') {
+                    mod.ccall('FPDF_SetSystemFontInfo', 'void', ['number'], [ptr]);
+                } else {
+                    fontDebug('⚠️ FPDF_SetSystemFontInfo 未导出, 跳过注册(中文可能空白)');
+                    __fontStats.install = '失败: SetSystemFontInfo未导出';
+                    return;
+                }
+                window.__fontProviderInstalled = true;
+                __fontStats.install = '成功';
+                fontDebug('✅ 中文字体提供器安装成功 (mode=' + mode + ')');
+            } catch (e) {
+                __fontStats.install = '异常: ' + (e && e.message ? e.message : e);
+                fontDebug('⚠️ 字体提供器安装失败 (不影响其余功能): ' + (e && e.message ? e.message : e));
+            }
+        }
+
         async function bootWasm() {
             try {
                 await waitForPdfium();
                 console.log('[boot] PDFium 已就绪, 开始加载 Rust WASM 引擎');
 
-                const wasmBindings = await import('./pkg/dianju_wasm_seal.js');
+                const cacheBuster = '?v=' + Date.now();
+                const wasmBindings = await import('./pkg/dianju_wasm_seal.js' + cacheBuster);
                 await wasmBindings.default();
                 console.log('[boot] Rust WASM 引擎加载成功');
 
                 // 关键: 调用 pdfium-render 导出的 initialize_pdfium_render()
                 // 参数1: PDFium 的 Emscripten 模块对象 (由 pdfium.js 加载)
-                // 参数2: 本 Rust WASM 模块对象 (wasm-bindgen 的模块, 传 undefined 即可, pdfium-render 内部会处理)
+                // 参数2: 本 Rust WASM 模块对象 (wasm-bindgen 导出模块, 必须包含 read_block_from_callback_wasm 等回调函数)
                 // 参数3: debug — 是否开启详细日志
                 if (typeof wasmBindings.initialize_pdfium_render === 'function') {
+                    // 将 wasm-bindgen 导出模块转为普通 JS 对象作为 local_wasm_module
+                    // pdfium-render 需要从中查找 read_block_from_callback_wasm / write_block_from_callback_wasm 等回调函数
+                    const localModule = Object.fromEntries(
+                        Object.entries(wasmBindings).filter(([k]) => k !== 'default')
+                    );
                     const result = wasmBindings.initialize_pdfium_render(
                         window.__pdfiumModule,
-                        window.__pdfiumModule, // local_wasm_module: pdfium-render 在 wasm-bindgen 模式下不需要自己的 Emscripten Module
-                        false
+                        localModule,
+                        true // 开启 debug 以便诊断问题
                     );
                     if (result) {
                         console.log('[boot] PDFium 模块绑定成功');
@@ -194,6 +575,59 @@
                     }
                 } else {
                     console.warn('[boot] initialize_pdfium_render 未找到');
+                }
+
+                // ====== 第2.5步: 加载中文字体 (必须在 init_application 之前!) ======
+                // PDFium WASM 没有平台默认字体提供器, CID 中文字体 (如 STSong-Light) 无法渲染
+                // 必须从外部加载中文字体数据并注入到 WASM 模块中, 且必须在 Pdfium::default() 之前完成
+                console.log('[boot] 开始加载中文字体...');
+                try {
+                    let fontLoaded = false;
+                    const FONT_NAME = 'default';
+
+                    // 1. 优先本地字体文件（最可靠, 无网络依赖）
+                    //    本地已提供 fonts/NotoSansSC-Regular.otf (8.3MB SubsetOTF)
+                    try {
+                        const localResponse = await fetchWithTimeout('fonts/NotoSansSC-Regular.otf', 8000);
+                        if (localResponse.ok) {
+                            const fontData = new Uint8Array(await localResponse.arrayBuffer());
+                            wasmBindings.register_font(FONT_NAME, fontData);
+                            window.__customFontBytes = fontData;   // 供 JS 端字体提供器使用
+                            window.__customFontName = FONT_NAME;
+                            fontLoaded = true;
+                            console.log('[boot] 本地字体加载成功, 大小:', fontData.length, 'bytes');
+                        }
+                    } catch (localErr) {
+                        console.log('[boot] 本地字体不可用, 尝试 CDN...', localErr.message);
+                    }
+
+                    // 2. jsdelivr CDN (notofonts 镜像, 对中国用户可达)
+                    //    注意: googlefonts/noto-cjk 的旧 OTF 路径已 404, 需用 notofonts 的 SubsetOTF
+                    if (!fontLoaded) {
+                        try {
+                            const cdnUrl = 'https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@main/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf';
+                            const cdnResponse = await fetchWithTimeout(cdnUrl, 15000);
+                            if (cdnResponse.ok) {
+                                const fontData = new Uint8Array(await cdnResponse.arrayBuffer());
+                                wasmBindings.register_font(FONT_NAME, fontData);
+                                window.__customFontBytes = fontData;
+                                window.__customFontName = FONT_NAME;
+                                fontLoaded = true;
+                                console.log('[boot] jsdelivr CDN 字体加载成功, 大小:', fontData.length, 'bytes');
+                            }
+                        } catch (cdnErr) {
+                            console.warn('[boot] jsdelivr CDN 加载失败:', cdnErr.message);
+                        }
+                    }
+
+                    if (!fontLoaded) {
+                        console.warn('[boot] ⚠️ 所有字体加载方式均失败, 中文 PDF 可能显示空白');
+                    } else {
+                        // 安装跨模块中文字体提供器 (把字体回调打补丁进 PDFium 函数表)
+                        installChineseFontProvider();
+                    }
+                } catch (fontError) {
+                    console.warn('[boot] ⚠️ 字体加载异常:', fontError.message, '— 中文 PDF 可能显示空白');
                 }
 
                 wasmBindings.init_application('spinner', 'screen', 'status');
@@ -229,9 +663,13 @@
         let currentPage = 0;
         let isSelectingPoint = false;
 
+        /// 当前右键点击的目标签章
+        let __activeSeal = null;
+
         window._onEngineReady = function() {
             console.log('[app] 引擎就绪, 等待用户操作');
             bindInteractionEvents();
+            bindSealInteraction();
         };
 
         async function getPlugin() {
@@ -274,6 +712,21 @@
                     document.getElementById('infoPages').textContent = pages;
                     document.getElementById('infoSize').textContent = size + ' KB';
                     document.getElementById('signConfig').style.display = 'block';
+
+                    // 读取已有签章数量
+                    try {
+                        const sealCount = await plugin.getSignaturesCount('');
+                        document.getElementById('infoSeals').textContent = sealCount;
+                        // 加载签章位置信息（用于右键菜单击测试）
+                        window.__sealInfo = [];
+                        const sealJson = await plugin.GetSealInfoJson();
+                        if (sealJson) {
+                            window.__sealInfo = JSON.parse(sealJson);
+                            console.log('[seal] 加载签章信息:', window.__sealInfo.length, '枚');
+                        }
+                    } catch (sealErr) {
+                        console.warn('[seal] 获取签章数失败:', sealErr.message);
+                    }
 
                     updatePageInfo(0, pages);
                     await plugin.SetPageMode(1, 100);
@@ -389,12 +842,26 @@
 
         /// Rust 调用: 所有页面渲染完成后重新绑定
         window.__wasm_on_pages_rendered = function() {
+            // 关闭可能残留的菜单
+            closeContextMenu();
+
             const sc = getScrollContainer();
             if (sc) {
                 // 渲染后滚动到之前记录的位置 (或顶部)
                 const targetPage = window.__wasm_last_page || 0;
                 scrollToPage(targetPage, false);
             }
+
+            // 重新加载签章位置信息（页面重渲染后坐标可能会变）
+            (async function() {
+                try {
+                    const plugin = await getPlugin();
+                    const sealJson = await plugin.GetSealInfoJson();
+                    if (sealJson) {
+                        window.__sealInfo = JSON.parse(sealJson);
+                    }
+                } catch(e) { /* ignore */ }
+            })();
         };
 
         /// Rust 调用: 翻页时丝滑滚动到目标页
@@ -432,6 +899,222 @@
                     }
                 }
             });
+        }
+
+        // ============================================================
+        // 签章右键菜单交互
+        // ============================================================
+
+        function bindSealInteraction() {
+            const sc = getScrollContainer();
+            if (!sc) return;
+
+            // 用全局 contextmenu 事件捕获，避免每个 canvas 单独绑定
+            document.addEventListener('contextmenu', function(e) {
+                if (isSelectingPoint) return;
+
+                // 检查点击目标是否在 screen 容器内
+                const screen = document.getElementById('screen');
+                if (!screen) return;
+                if (!screen.contains(e.target)) return;
+
+                // 查找点击所在的 canvas (PDF 页面)
+                const canvas = e.target.closest('canvas[data-page]');
+                if (!canvas) return;
+
+                const pageIdx = parseInt(canvas.getAttribute('data-page'), 10);
+                if (isNaN(pageIdx)) return;
+
+                // 计算点击在 canvas 内的相对坐标
+                const rect = canvas.getBoundingClientRect();
+                const clickX = e.clientX - rect.left;
+                const clickY = e.clientY - rect.top;
+
+                // 计算 canvas 显示尺寸与逻辑尺寸的比例
+                const scaleX = canvas.width / rect.width;
+                const scaleY = canvas.height / rect.height;
+                const docX = clickX * scaleX;
+                const docY = clickY * scaleY;
+
+                // 遍历已有签章进行命中测试
+                const seals = window.__sealInfo || [];
+                let hitSeal = null;
+                for (const seal of seals) {
+                    if (seal.page_index !== pageIdx) continue;
+                    // 签章区域在 canvas 上的坐标（PDF 坐标）
+                    const sx = seal.x * scaleX;
+                    const sy = seal.y * scaleY;
+                    const sw = seal.width * scaleX;
+                    const sh = seal.height * scaleY;
+                    if (docX >= sx && docX <= sx + sw && docY >= sy && docY <= sy + sh) {
+                        hitSeal = seal;
+                        break;
+                    }
+                }
+
+                if (hitSeal) {
+                    e.preventDefault();
+                    __activeSeal = hitSeal;
+                    showContextMenu(e.clientX, e.clientY);
+                }
+            });
+
+            // 点击其他地方关闭菜单
+            document.addEventListener('click', function(e) {
+                const menu = document.getElementById('sealContextMenu');
+                if (menu && !menu.contains(e.target)) {
+                    menu.style.display = 'none';
+                }
+            });
+        }
+
+        /// 显示右键菜单
+        function showContextMenu(x, y) {
+            const menu = document.getElementById('sealContextMenu');
+            const screenW = window.innerWidth;
+            const screenH = window.innerHeight;
+            const menuW = 140;
+            const menuH = 80;
+
+            // 调整位置防止溢出
+            let left = x;
+            let top = y;
+            if (left + menuW > screenW) left = screenW - menuW - 8;
+            if (top + menuH > screenH) top = screenH - menuH - 8;
+            if (left < 0) left = 8;
+            if (top < 0) top = 8;
+
+            menu.style.left = left + 'px';
+            menu.style.top = top + 'px';
+            menu.style.display = 'block';
+        }
+
+        /// 关闭右键菜单
+        function closeContextMenu() {
+            document.getElementById('sealContextMenu').style.display = 'none';
+        }
+
+        /// 关闭弹框
+        function closeModal(id) {
+            document.getElementById(id).classList.remove('active');
+        }
+
+        // 辅助: 格式化时间为 年/月/日 时:分:秒
+        function fmtTime(val) {
+            if (!val) return '-';
+            // PDF 日期格式: D:YYYYMMDDHHmmSS+HH'mm' 或 D:YYYYMMDDHHmmSS'HH'mm'
+            const pdfMatch = val.match(/^D:(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+            if (pdfMatch) {
+                return `${pdfMatch[1]}/${pdfMatch[2]}/${pdfMatch[3]} ${pdfMatch[4]}:${pdfMatch[5]}:${pdfMatch[6]}`;
+            }
+            // ASN1Time 格式: "Jul 10 01:43:03 2025 +00:00" → "2025/07/10 01:43:03 UTC"
+            const monthMap = {'Jan':'01','Feb':'02','Mar':'03','Apr':'04','May':'05','Jun':'06','Jul':'07','Aug':'08','Sep':'09','Oct':'10','Nov':'11','Dec':'12'};
+            const asn1Match = val.match(/^(\w{3})\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\d{4})(?:\s+([+-]\d{2}:\d{2}))?/);
+            if (asn1Match && monthMap[asn1Match[1]]) {
+                const month = monthMap[asn1Match[1]];
+                const day = asn1Match[2].padStart(2, '0');
+                const tz = asn1Match[5] && asn1Match[5] === '+00:00' ? ' UTC' : (asn1Match[5] ? ' ' + asn1Match[5] : '');
+                return `${asn1Match[4]}/${month}/${day} ${asn1Match[3]}${tz}`;
+            }
+            // ASN1Time 另一种格式: "2025-11-03 01:43:03 UTC"
+            const asn1bMatch = val.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}:\d{2})/);
+            if (asn1bMatch) {
+                const tz = val.includes('UTC') ? ' UTC' : '';
+                return `${asn1bMatch[1]}/${asn1bMatch[2]}/${asn1bMatch[3]} ${asn1bMatch[4]}${tz}`;
+            }
+            // ISODate 格式: "20251103014303Z"
+            const isoMatch = val.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z/);
+            if (isoMatch) {
+                return `${isoMatch[1]}/${isoMatch[2]}/${isoMatch[3]} ${isoMatch[4]}:${isoMatch[5]}:${isoMatch[6]}`;
+            }
+            return val;
+        }
+
+        /// 验证签章
+        function verifySeal() {
+            closeContextMenu();
+            const seal = __activeSeal;
+            if (!seal) return;
+
+            const body = document.getElementById('verifyBody');
+            const info = seal.seal_info || {};
+
+            // 判断签名状态
+            const signed = seal.signed;
+            const statusIcon = signed ? '✅' : '⚠️';
+            const statusText = signed ? '该电子签章验证通过，签名有效。' : '该签章为文档中的签名域，尚未签署或签名信息不可验证。';
+            const iconClass = signed ? 'pass' : 'warn';
+
+            body.innerHTML = `
+                <div class="verify-status">
+                    <div class="verify-icon ${iconClass}">${statusIcon}</div>
+                    <div style="flex:1">
+                        <div style="font-size:15px; font-weight:500; color:#262626;">${statusText}</div>
+                    </div>
+                </div>
+                <div class="verify-detail">
+                    <div class="row"><span class="label">签章名称</span><span class="value">${info.sealName || '未命名'}</span></div>
+                    <div class="row"><span class="label">签章时间</span><span class="value">${info.signTime || '-'}</span></div>
+                    <div class="row"><span class="label">签名方法</span><span class="value">${info.signMethod || '-'}</span></div>
+                    <div class="row"><span class="label">签章人</span><span class="value">${info.signerName || '-'}</span></div>
+                    <div class="row"><span class="label">所在页面</span><span class="value">第 ${seal.page_index + 1} 页</span></div>
+                    <div class="row"><span class="label">位置</span><span class="value">(${Math.round(seal.x)}, ${Math.round(seal.y)})</span></div>
+                    <div class="row"><span class="label">大小</span><span class="value">${Math.round(seal.width)} × ${Math.round(seal.height)} pt</span></div>
+                    <div class="row"><span class="label">签名状态</span><span class="value">${signed ? '已签署' : '未签署'}</span></div>
+                    ${info.signerName ? `<div class="row"><span class="label">签章人</span><span class="value">${info.signerName}</span></div>` : ''}
+                    ${info.signTime ? `<div class="row"><span class="label">签章时间</span><span class="value">${fmtTime(info.signTime)}</span></div>` : ''}
+                    ${info.signCertSn ? `<div class="row"><span class="label">证书序列号</span><span class="value">${info.signCertSn}</span></div>` : ''}
+                    ${info.certStartTime ? `<div class="row"><span class="label">有效期起</span><span class="value">${fmtTime(info.certStartTime)}</span></div>` : ''}
+                    ${info.certEndTime ? `<div class="row"><span class="label">有效期止</span><span class="value">${fmtTime(info.certEndTime)}</span></div>` : ''}
+                    ${info.sealStartTime ? `<div class="row"><span class="label">有效期起</span><span class="value">${fmtTime(info.sealStartTime)}</span></div>` : ''}
+                    ${info.sealEndTime ? `<div class="row"><span class="label">有效期止</span><span class="value">${fmtTime(info.sealEndTime)}</span></div>` : ''}
+                    ${info.certIssuer ? `<div class="row"><span class="label">颁发者</span><span class="value" style="font-size:11px;">${info.certIssuer}</span></div>` : ''}
+                    ${info.certAlgorithm ? `<div class="row"><span class="label">算法标识</span><span class="value">${info.certAlgorithm}</span></div>` : ''}
+                </div>
+            `;
+
+            document.getElementById('verifyModal').classList.add('active');
+        }
+
+        /// 显示签章属性
+        function showSealProperties() {
+            closeContextMenu();
+            const seal = __activeSeal;
+            if (!seal) return;
+
+            const body = document.getElementById('propertyBody');
+            const info = seal.seal_info || {};
+
+            // 辅助: 显示值或占位符
+            const v = (val, placeholder = '-') => (val !== undefined && val !== null && val !== '') ? val : placeholder;
+            // 辅助: 截断长值
+            const trunc = (val, max = 60) => val && val.length > max ? val.substring(0, max) + '...' : v(val);
+
+            body.innerHTML = `
+                <table class="prop-table">
+                    <tr><td>签章名称</td><td>${v(info.sealName, '未命名')}</td></tr>
+                    <tr><td>签章编号</td><td>${v(info.sealId)}</td></tr>
+                    <tr><td>签章类型</td><td>${info.sealType === 0 ? '印章注释' : info.sealType === 1 ? '数字签名域' : info.sealType !== undefined ? '类型 ' + info.sealType : '-'}</td></tr>
+                    <tr><td>所在页面</td><td>第 ${seal.page_index + 1} 页</td></tr>
+                    <tr><td>签名方法</td><td>${v(info.signMethod)}</td></tr>
+                    <tr><td>签章时间</td><td>${fmtTime(info.signTime)}</td></tr>
+                    <tr><td>签章人</td><td>${v(info.signerName)}</td></tr>
+                    <tr><td>签章证书序列号</td><td style="font-size:11px;">${v(info.signCertSn)}</td></tr>
+                    <tr><td>签章证书颁发者</td><td style="font-size:11px;">${v(info.certIssuer)}</td></tr>
+                    <tr><td>签章证书 DN</td><td style="font-size:11px; word-break:break-all;">${v(info.certSubject)}</td></tr>
+                    <tr><td>签章证书起始时间</td><td>${fmtTime(info.certStartTime)}</td></tr>
+                    <tr><td>签章证书终止时间</td><td>${fmtTime(info.certEndTime)}</td></tr>
+                    <tr><td>签章证书算法标识</td><td>${v(info.certAlgorithm)}</td></tr>
+                    <tr><td>签章证书数据</td><td style="font-size:10px; word-break:break-all; line-height:1.4;">${trunc(info.certData, 120)}</td></tr>
+                    <tr><td>位置 (pt)</td><td>(${Math.round(seal.x)}, ${Math.round(seal.y)})</td></tr>
+                    <tr><td>尺寸 (pt)</td><td>${Math.round(seal.width)} × ${Math.round(seal.height)}</td></tr>
+                    <tr><td>物理尺寸 (mm)</td><td>${info.width ? Math.round(info.width) : '-'} × ${info.height ? Math.round(info.height) : '-'}</td></tr>
+                    <tr><td>签名状态</td><td>${seal.signed ? '✅ 已签署' : '⚠️ 未签署'}</td></tr>
+                    <tr><td>来源</td><td>${v(info.origin, 'PDF 文档')}</td></tr>
+                </table>
+            `;
+
+            document.getElementById('propertyModal').classList.add('active');
         }
 
         // 落章回调

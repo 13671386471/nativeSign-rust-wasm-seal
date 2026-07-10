@@ -1,0 +1,4 @@
+原始 test_labor_contract.pdf: pages=2 CJK=1696 odd_hex_warn=0 first='劳动合同书\n甲方：中国长城科技集团股份有限公司 乙方（员工）： 楚红\n地址：深圳市南山科技园长城大厦 工号： 电话:\n电话： （0755）26639997 身份'
+Python sample.embedded.pdf: pages=3 CJK=3492 odd_hex_warn=2670 first='第一章\xa0总则\n第一条\xa0为了规范电子签名行为，确立电子签名的法律效力，维护有关各方的合法权益，制定本法。\n第二条\xa0本法所称电子签名，是指数据电文中以电子形式所含、'
+WASM test_labor_contract.embedded_by_wasm.pdf: pages=2 CJK=13 odd_hex_warn=1335 first='\x00\x00\x00\x00\x00\n\x00\x00φ\x00\x00䮵\x00〇\x00䳼\x00㛗\x00\x00䲆\x00\x00 \x00\x00δ\x00\x00εφ \x00㓘\n\x00\x00φ\x00\x00\x00\x00\x00〇\x00\x00䮵\x00\x00\x00 \x00\x00φ \x00䈓\x00\n\x00䈓φ δ\x00\x00\x00\x00ε\x00\x00\x00\x00\x00\x00\x00\x00 䓡\x00'
+WASM test_helvetica.embedded_by_wasm.pdf: pages=1 CJK=0 odd_hex_warn=445 first='Hello\xa0World\xa0‑\xa0Font\xa0Test'

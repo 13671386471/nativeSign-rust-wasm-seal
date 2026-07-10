@@ -140,6 +140,8 @@ pub fn parse_ofd(data: &[u8]) -> Result<OfdDocument, String> {
     // 2) Document.xml → Page 列表 + CommonData 路径
     let (page_refs, common_data_path) = read_document_manifest(&mut archive, &doc_root)?;
 
+    web_sys::console::log_1(&format!("[parse_ofd] doc_root={}, pages_found={}", doc_root, page_refs.len()).into());
+
     // 3) 解析公共资源 (字体 + 图片)
     let mut fonts: HashMap<String, OfdFont> = HashMap::new();
     let mut public_images: HashMap<String, Vec<u8>> = HashMap::new();
@@ -157,8 +159,12 @@ pub fn parse_ofd(data: &[u8]) -> Result<OfdDocument, String> {
     for (idx, page_ref) in page_refs.iter().enumerate() {
         let page_file = resolve_page_path(&base_dir, page_ref);
         let page = parse_page_content(&mut archive, &page_file, idx as u32)?;
+        web_sys::console::log_1(&format!("[parse_ofd] page[{}] objects={} physical_box={:.0}x{:.0}",
+            idx, page.objects.len(), page.physical_box.w, page.physical_box.h).into());
         pages.push(page);
     }
+
+    web_sys::console::log_1(&format!("[parse_ofd] TOTAL: {} pages parsed", pages.len()).into());
 
     Ok(OfdDocument {
         doc_info: OfdDocInfo::default(),
@@ -398,13 +404,19 @@ fn parse_text_object(
     let mut stroke_color: Option<OfdColor> = None;
     let mut text_items: Vec<OfdTextItem> = Vec::new();
 
+    // TextObject 级别的基准坐标（实际 OFD 文件常在此处设置 X/Y 元素）
+    let mut base_x = 0.0f64;
+    let mut base_y = 0.0f64;
+
     let mut in_text_code = false;
     let mut current_x = 0.0f64;
     let mut current_y = 0.0f64;
     let mut delta_x_arr: Vec<f64> = Vec::new();
     let mut delta_y_arr: Vec<f64> = Vec::new();
-    let mut delta_x_idx = 0usize;
-    let mut delta_y_idx = 0usize;
+
+    /// 状态追踪：当前进入的直接子元素标签名，用于捕获其文本内容
+    /// 可能值: "Size", "FontName", "X", "Y", ""(不在目标元素中)
+    let mut current_text_elem: String = String::new();
 
     loop {
         match r.read_event_into(buf) {
@@ -413,6 +425,7 @@ fn parse_text_object(
                 match tag.as_str() {
                     "TextCode" => {
                         in_text_code = true;
+                        current_text_elem.clear();
                         current_x = attr_val(e, r, "X")
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(current_x);
@@ -421,38 +434,64 @@ fn parse_text_object(
                             .unwrap_or(current_y);
                         if let Some(dx) = attr_val(e, r, "DeltaX") {
                             delta_x_arr = parse_num_array(&dx);
-                            delta_x_idx = 0;
                         }
                         if let Some(dy) = attr_val(e, r, "DeltaY") {
                             delta_y_arr = parse_num_array(&dy);
-                            delta_y_idx = 0;
                         }
                     }
                     "Font" => {
-                        font_size = attr_val(e, r, "Size")
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(font_size);
+                        current_text_elem.clear();
+                        // 兼容格式A: <Font Size="12" FamilyName="..." />
+                        if let Some(size) = attr_val(e, r, "Size") {
+                            if let Ok(sz) = size.parse::<f64>() {
+                                font_size = sz;
+                            }
+                        }
+                        if let Some(family) = attr_val(e, r, "FamilyName")
+                            .or_else(|| attr_val(e, r, "FontName"))
+                        {
+                            if !family.is_empty() {
+                                font_family = family;
+                            }
+                        }
                     }
                     "FillColor" => {
+                        current_text_elem.clear();
                         if let Some(v) = attr_val(e, r, "Value") {
                             fill_color = parse_color(&v);
                         }
                     }
                     "StrokeColor" => {
+                        current_text_elem.clear();
                         if let Some(v) = attr_val(e, r, "Value") {
                             stroke_color = Some(parse_color(&v));
                         }
                     }
-                    _ => {}
+                    // 实际 OFD 文件中 TextObject 的直接子元素（需要捕获文本内容）
+                    "Size" | "FontName" | "X" | "Y" => {
+                        current_text_elem = tag.clone();
+                    }
+                    _ => {
+                        current_text_elem.clear();
+                    }
                 }
             }
             Ok(Event::Empty(ref e)) => {
                 let tag = local_name(e.name().as_ref());
                 match tag.as_str() {
                     "Font" => {
-                        font_size = attr_val(e, r, "Size")
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(font_size);
+                        if let Some(size) = attr_val(e, r, "Size") {
+                            if let Ok(sz) = size.parse::<f64>() {
+                                font_size = sz;
+                            }
+                        }
+                        if let Some(family) = attr_val(e, r, "FamilyName")
+                            .or_else(|| attr_val(e, r, "FontName"))
+                        {
+                            if !family.is_empty() {
+                                font_family = family;
+                            }
+                        }
                     }
                     "FillColor" => {
                         if let Some(v) = attr_val(e, r, "Value") {
@@ -466,38 +505,76 @@ fn parse_text_object(
                     }
                     _ => {}
                 }
+                current_text_elem.clear();
             }
             Ok(Event::Text(ref e)) => {
+                let raw = e.unescape().unwrap_or_default();
+                let text = raw.to_string();
+
                 if in_text_code {
-                    let raw = e.unescape().unwrap_or_default();
-                    let text = raw.to_string();
+                    // TextCode 内的文本内容 → 实际显示文字
                     if !text.trim().is_empty() {
-                        let mut x = current_x;
-                        let _y = current_y;
+                        let mut x = base_x + current_x;
                         let char_count = text.chars().count();
 
                         // 逐字偏移 (DeltaX 数组)
                         for gi in 0..char_count {
                             if gi > 0 {
                                 x += delta_x_arr.get(gi - 1).copied().unwrap_or(0.0);
-                                // y += delta_y_arr.get(gi - 1).copied().unwrap_or(0.0);
                             }
                         }
 
-                        text_items.push(OfdTextItem { x, y: current_y, text });
+                        text_items.push(OfdTextItem { x, y: base_y + current_y, text });
                         current_x += char_count as f64
                             * delta_x_arr.last().copied().unwrap_or(0.0);
                         current_y += char_count as f64
                             * delta_y_arr.last().copied().unwrap_or(0.0);
                     }
+                } else if !current_text_elem.is_empty() {
+                    // TextObject 直接子元素的文本内容
+                    let trimmed = text.trim();
+                    match current_text_elem.as_str() {
+                        "Size" => {
+                            if let Ok(sz) = trimmed.parse::<f64>() {
+                                font_size = sz;
+                            }
+                        }
+                        "FontName" => {
+                            if !trimmed.is_empty() {
+                                font_family = trimmed.to_string();
+                            }
+                        }
+                        "X" => {
+                            if let Ok(val) = trimmed.parse::<f64>() {
+                                base_x = val;
+                            }
+                        }
+                        "Y" => {
+                            if let Ok(val) = trimmed.parse::<f64>() {
+                                base_y = val;
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             Ok(Event::End(ref e)) => {
                 let tag = local_name(e.name().as_ref());
-                if tag == "TextCode" {
-                    in_text_code = false;
-                } else if tag == "TextObject" {
-                    break;
+                match tag.as_str() {
+                    "TextCode" => {
+                        in_text_code = false;
+                        current_text_elem.clear();
+                    }
+                    "TextObject" => break,
+                    _ => {
+                        // 退出任何子元素时清除状态
+                        if tag == current_text_elem.as_str()
+                            || tag == "Size" || tag == "FontName"
+                            || tag == "X" || tag == "Y"
+                        {
+                            current_text_elem.clear();
+                        }
+                    }
                 }
             }
             Ok(Event::Eof) => break,

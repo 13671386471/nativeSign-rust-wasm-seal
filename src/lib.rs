@@ -34,10 +34,12 @@ mod ukey;
 mod render;
 mod utils;
 mod ofd_parser;
+mod font_provider;
+mod font_embed;
 
 use wasm_bindgen::prelude::*;
 use std::cell::RefCell;
-
+use web_sys;
 // ============================================================
 // 全局单例 — 引擎状态管理
 // ============================================================
@@ -93,7 +95,11 @@ where
 fn refresh_render() {
     with_engine(|engine| {
         let doc_state = engine.doc.state.clone();
-        let _ = engine.render.refresh(&doc_state);
+        web_sys::console::log_1(&format!("[refresh] doc_type={:?} page_count={} is_opened={}",
+            doc_state.doc_type, doc_state.page_count, doc_state.is_opened).into());
+        if let Err(e) = engine.render.refresh(&doc_state) {
+            web_sys::console::error_1(&format!("[refresh] 渲染失败: {:?}", e).into());
+        }
     });
 }
 
@@ -146,9 +152,36 @@ pub fn regist_listener(event_name: &str, js_func_name: &str, _async: bool) -> Re
 pub async fn load_file(file_data: Vec<u8>, file_name: &str) -> Result<String, JsValue> {
     let result = with_engine(|engine| {
         engine.render.reset(); // 清除旧文档的渲染元素
-        engine.doc.load_file(file_data, file_name)
+
+        // 第一步：在原始数据上解析已有签章（预处理可能损坏 PDF 结构）
+        let existing_seals = if file_name.to_lowercase().ends_with(".pdf") {
+            engine::DocumentEngine::parse_existing_signatures(&file_data)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // 第二步：预处理嵌入中文字体
+        let processed = font_embed::preprocess_pdf_for_cjk(&file_data);
+
+        // 第三步：加载文件
+        engine.doc.load_file(processed, file_name)
             .map(|_| "1".to_string())
-            .map_err(|e| JsValue::from_str(&e))
+            .map_err(|e| JsValue::from_str(&e))?;
+
+        // 第四步：恢复已有签章统计（覆盖预处理文件上的空结果）
+        if !existing_seals.is_empty() {
+            engine.doc.state.seals = existing_seals;
+            engine.doc.state.seal_count = engine.doc.state.seals.len() as u32;
+            engine.doc.state.signed_count = engine.doc.state.seals.iter()
+                .filter(|s| s.signed)
+                .count() as u32;
+            web_sys::console::log_1(&format!(
+                "[load_file] 恢复 {} 枚已有签章", engine.doc.state.seal_count
+            ).into());
+        }
+
+        Ok("1".to_string())
     });
     refresh_render();
     result
@@ -233,6 +266,13 @@ pub async fn close_doc(flags: i32) {
 #[wasm_bindgen]
 pub async fn get_signatures_count(seal_type: &str) -> u32 {
     with_engine(|engine| engine.doc.get_signatures_count(seal_type))
+}
+
+/// 获取所有签章信息 (JSON 数组)
+/// 返回包含每枚印章的位置、名称、大小、签名状态等信息的 JSON 字符串
+#[wasm_bindgen]
+pub async fn get_seal_info_json() -> String {
+    with_engine(|engine| engine.doc.get_seal_info_json())
 }
 
 /// 获取下一页注释节点
@@ -755,6 +795,15 @@ pub fn ini_ctrl_ready_callback(callback: &js_sys::Function) {
 #[wasm_bindgen]
 pub fn log(msg: &str) {
     web_sys::console::log_1(&msg.into());
+}
+
+/// 自动嵌入中文字体预处理 (方案 A 对外接口)
+///
+/// 对未嵌入 CID 中文字体的 PDF, 在加载前注入 NotoSansSC 并改写内容流字符码,
+/// 使 PDFium WASM 可正确渲染中文。失败或无需处理时返回原始字节。
+#[wasm_bindgen]
+pub fn preprocess_pdf_for_cjk(pdf: Vec<u8>) -> Vec<u8> {
+    font_embed::preprocess_pdf_for_cjk(&pdf)
 }
 
 /// 获取引擎版本
