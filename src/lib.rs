@@ -9,8 +9,9 @@
 //! 以下位置使用了模拟数据，生产部署前需要替换：
 //!
 //! 1. FIXME: REPLACE_WITH_REAL_CERT
-//!    crypto.rs — MOCK_RSA_CERT, MOCK_SM2_CERT 证书公钥
-//!    crypto.rs — _MOCK_RSA_PRIVKEY, _MOCK_SM2_PRIVKEY 私钥
+//!    crypto.rs — MOCK_RSA_CERT, MOCK_SM2_CERT 证书公钥 (仅用于 API 返回值)
+//!    crypto.rs — SM2 密钥对在首次使用时由 libsm 随机生成 (非持久化)
+//!    注意: SM2/SM3/SM4 算法本身已使用 libsm crate 的真实实现
 //!
 //! 2. FIXME: REPLACE_WITH_REAL_SIGN_SERVICE
 //!    sign.rs — cloud_sign() 云签 HTTP 服务调用
@@ -1200,4 +1201,48 @@ pub async fn get_ses_info() -> String {
             "seals": infos,
         })).unwrap_or_default()
     })
+}
+
+// ============================================================
+// 国密算法测试接口 — 暴露 SM2/SM3/SM4 供 JS 端直接调用和验证
+// ============================================================
+
+/// SM3 哈希计算
+#[wasm_bindgen]
+pub fn sm3_hash(data: Vec<u8>) -> Vec<u8> {
+    crypto::sm3_hash(&data)
+}
+
+/// SM2 签名 (返回 DER 编码的签名值)
+#[wasm_bindgen]
+pub fn sm2_sign(data: Vec<u8>, privkey_der: Vec<u8>) -> Result<Vec<u8>, JsValue> {
+    crypto::sm2_sign(&data, &privkey_der)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// SM2 验签
+#[wasm_bindgen]
+pub fn sm2_verify(data: Vec<u8>, signature: Vec<u8>, pubkey_der: Vec<u8>) -> Result<bool, JsValue> {
+    crypto::sm2_verify(&data, &signature, &pubkey_der)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// 获取 SM2 公钥 (65字节, 非压缩格式)
+#[wasm_bindgen]
+pub fn get_sm2_pubkey() -> Vec<u8> {
+    crypto::get_sm2_pubkey()
+}
+
+/// SM4 CBC 加密
+#[wasm_bindgen]
+pub fn sm4_encrypt(data: Vec<u8>, key: Vec<u8>, iv: Vec<u8>) -> Result<Vec<u8>, JsValue> {
+    crypto::sm4_encrypt(&data, &key, &iv)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// SM4 CBC 解密
+#[wasm_bindgen]
+pub fn sm4_decrypt(data: Vec<u8>, key: Vec<u8>, iv: Vec<u8>) -> Result<Vec<u8>, JsValue> {
+    crypto::sm4_decrypt(&data, &key, &iv)
+        .map_err(|e| JsValue::from_str(&e))
 }

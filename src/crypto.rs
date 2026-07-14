@@ -1,12 +1,23 @@
 //! 国密算法模块 — SM2/SM3/SM4 + RSA/SHA256
 //!
+//! 实现状态:
+//! - SM3: 真实现 (libsm::sm3, GM/T 0004-2012)
+//! - SM2: 真实现 (libsm::sm2::signature, GM/T 0003-2012)
+//! - SM4: 真实现 (libsm::sm4, CBC模式, GM/T 0002-2012)
+//! - RSA: 仍为假实现 (非国密算法, 仅用于兼容)
+//!
 //! ⚠️ MOCK 说明：
-//! - 证书密钥使用假数据模拟，标记为 `FIXME: REPLACE_WITH_REAL_CERT`
+//! - SM2 密钥对在首次使用时由 libsm 随机生成, 每次加载 WASM 时不同
+//! - 证书仍为假数据, 标记为 `FIXME: REPLACE_WITH_REAL_CERT`
 //! - 生产环境需替换为经过国家密码管理局认证的真实证书和密钥
 
 use sha2::{Sha256, Digest};
 use md5::Md5;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use std::sync::OnceLock;
+
+use libsm::sm2::signature::{SigCtx, Signature};
+use libsm::sm4::{Cipher as Sm4Cipher, Mode as Sm4Mode};
 
 // ============================================================
 // 假证书数据 — 仅在开发和测试阶段使用
@@ -21,19 +32,12 @@ pub const MOCK_RSA_CERT: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCbCjqtkT8
 pub const MOCK_SM2_CERT: &str = "MFkwEwYHKoZIzj0CAQYIKoEcz1UBgi0DQgAEgLHeUjG9svZEuBUFh1zICkk76BUZwGjBYkU4CgmlSS/ra5/ip2EaedAxAwRc/TaKZ8EANZIg0TbPKEeS48x9ww==";
 // FIXME: REPLACE_WITH_REAL_CERT — 替换为真实SM2证书
 
-/// 模拟的 RSA 私钥 — 假数据（生产环境绝不暴露私钥）
-const _MOCK_RSA_PRIVKEY: &str = "FIXME: REPLACE_WITH_REAL_CERT";
-/// 模拟的 SM2 私钥 — 假数据（生产环境绝不暴露私钥）
-const _MOCK_SM2_PRIVKEY: &str = "FIXME: REPLACE_WITH_REAL_CERT";
-
 // ============================================================
-// SM3 哈希 (国密标准 GM/T 0004-2012)
+// SM3 哈希 (国密标准 GM/T 0004-2012) — 真实实现
 // ============================================================
 
 /// SM3 哈希计算
 pub fn sm3_hash(data: &[u8]) -> Vec<u8> {
-    // 使用 libsm crate 中的 SM3 实现
-    // 生产环境中应使用经过认证的 SM3 实现
     libsm::sm3::hash::Sm3Hash::new(data).get_hash().to_vec()
 }
 
@@ -75,74 +79,154 @@ pub fn md5_hex(data: &[u8]) -> String {
 }
 
 // ============================================================
-// SM2 签名与验签 (GM/T 0003-2012)
+// SM2 签名与验签 (GM/T 0003-2012) — 真实实现
 // ============================================================
 
-/// SM2 签名
-/// 使用假私钥进行模拟签名
-/// FIXME: REPLACE_WITH_REAL_CERT — 生产环境中签名应在云端/UKey硬件中完成
+/// SM2 密钥对 (pubkey: 65字节非压缩格式 0x04||x||y, seckey: 32字节)
+struct Sm2KeyPair {
+    pubkey: Vec<u8>,
+    seckey: Vec<u8>,
+}
+
+/// SM2 密钥对全局缓存 — 首次使用时由 libsm 随机生成
+static SM2_KEYPAIR: OnceLock<Sm2KeyPair> = OnceLock::new();
+
+/// 获取或生成 SM2 密钥对
+///
+/// 首次调用时使用 libsm 生成随机 SM2 密钥对 (sm2p256v1 曲线),
+/// 后续调用直接返回缓存。密钥对在 WASM 模块生命周期内保持不变。
+///
+/// ⚠️ MOCK 说明: 每次加载 WASM 时密钥对不同, 不具备持久性。
+/// FIXME: REPLACE_WITH_REAL_CERT — 生产环境应加载固定 SM2 证书和私钥。
+fn ensure_sm2_keypair() -> &'static Sm2KeyPair {
+    SM2_KEYPAIR.get_or_init(|| {
+        let ctx = SigCtx::new();
+        let (pk, sk) = ctx.new_keypair()
+            .expect("[crypto] SM2 keypair generation failed");
+        let pubkey = ctx.serialize_pubkey(&pk, false)
+            .expect("[crypto] SM2 public key serialization failed");
+        let seckey = ctx.serialize_seckey(&sk)
+            .expect("[crypto] SM2 private key serialization failed");
+        Sm2KeyPair { pubkey, seckey }
+    })
+}
+
+/// 获取当前 SM2 公钥 (65字节, 非压缩格式, 0x04||x||y)
+pub fn get_sm2_pubkey() -> Vec<u8> {
+    ensure_sm2_keypair().pubkey.clone()
+}
+
+/// 获取当前 SM2 私钥 (32字节)
+pub fn get_sm2_seckey() -> Vec<u8> {
+    ensure_sm2_keypair().seckey.clone()
+}
+
+/// SM2 签名 (GM/T 0003-2012)
+///
+/// 使用 libsm 进行真实的 SM2 椭圆曲线数字签名。
+/// 签名流程: Z_A = SM3(ID||a||b||G||P_A), e = SM3(Z_A||M),
+///           生成随机 k, 计算 (r, s) = SM2_Sign(e, k, d_A)。
+/// 默认用户 ID 为 "1234567812345678" (GM/T 0003-2012 推荐值)。
+///
+/// # 参数
+/// - `data`: 待签名数据
+/// - `_privkey_der`: (预留, 当前忽略) PKCS#8 DER 格式私钥,
+///   生产环境应从此参数加载真实私钥
+///
+/// # 返回
+/// DER 编码的签名值 (ASN.1 SEQUENCE { r INTEGER, s INTEGER })
+///
+/// ⚠️ MOCK 说明: 使用动态生成的 SM2 密钥对签名
+/// FIXME: REPLACE_WITH_REAL_CERT — 生产环境应使用真实 CA 签发的 SM2 证书和私钥
 pub fn sm2_sign(data: &[u8], _privkey_der: &[u8]) -> Result<Vec<u8>, String> {
-    // 注意：实际 SM2 签名需要使用 SM2 密钥对
-    // 此处在 WASM 中使用纯 Rust 实现的 libsm 进行签名
-    // 生产环境中，签名应在云端服务或 UKey 硬件中完成
-
-    // 使用 SM3 对数据进行哈希
-    let digest = sm3_hash(data);
-
-    // FIXME: 生产环境需加载真实的 SM2 私钥进行签名
-    // 当前使用 libsm 进行真实的 SM2 签名，但密钥是模拟的
-
-    // 对于演示目的，返回模拟的签名结果
-    let mut signature = vec![0x30u8; 64]; // 模拟的 64 字节签名
-    signature[0..32].copy_from_slice(&digest[0..32]);
-    // 颠倒后32字节以模拟签名格式
-    for i in 0..32 {
-        signature[32 + i] = digest[31 - i];
-    }
-
-    Ok(signature)
+    let kp = ensure_sm2_keypair();
+    let ctx = SigCtx::new();
+    let sk = ctx.load_seckey(&kp.seckey)
+        .map_err(|e| format!("SM2 load seckey error: {}", e))?;
+    let pk = ctx.load_pubkey(&kp.pubkey)
+        .map_err(|e| format!("SM2 load pubkey error: {}", e))?;
+    let sig = ctx.sign(data, &sk, &pk)
+        .map_err(|e| format!("SM2 sign error: {}", e))?;
+    Ok(sig.der_encode())
 }
 
-/// SM2 验签
+/// SM2 验签 (GM/T 0003-2012)
+///
+/// 使用 libsm 进行真实的 SM2 椭圆曲线签名验证。
+///
+/// # 参数
+/// - `data`: 原始数据
+/// - `signature`: DER 编码的签名值 (ASN.1 SEQUENCE { r INTEGER, s INTEGER })
+/// - `_pubkey_der`: (预留, 当前忽略) PKCS#8 DER 格式公钥
+///
+/// # 返回
+/// `Ok(true)` 验签通过, `Ok(false)` 验签失败, `Err` 格式错误
 pub fn sm2_verify(data: &[u8], signature: &[u8], _pubkey_der: &[u8]) -> Result<bool, String> {
-    let digest = sm3_hash(data);
+    let kp = ensure_sm2_keypair();
+    let ctx = SigCtx::new();
+    let pk = ctx.load_pubkey(&kp.pubkey)
+        .map_err(|e| format!("SM2 load pubkey error: {}", e))?;
+    let sig = Signature::der_decode(signature)
+        .map_err(|e| format!("SM2 signature DER decode error: {}", e))?;
+    ctx.verify(data, &pk, &sig)
+        .map_err(|e| format!("SM2 verify error: {}", e))
+}
 
-    // 验证签名结构（简化版）
-    if signature.len() < 64 {
-        return Ok(false);
+// ============================================================
+// SM4 对称加密 (GM/T 0002-2012) — 真实实现, CBC模式
+// ============================================================
+
+/// SM4 加密 (CBC模式, PKCS#7 自动填充)
+///
+/// 使用 libsm 实现真实的 SM4 分组密码加密。
+/// - 密钥长度: 128 位 (16 字节)
+/// - IV 长度: 128 位 (16 字节)
+/// - 填充模式: PKCS#7 (CBC模式自动处理)
+///
+/// # 参数
+/// - `data`: 明文数据 (任意长度)
+/// - `key`: 密钥 (必须 16 字节)
+/// - `iv`: 初始化向量 (必须 16 字节)
+///
+/// # 返回
+/// 密文数据 (长度为 16 的整数倍)
+pub fn sm4_encrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, String> {
+    if key.len() != 16 {
+        return Err(format!("SM4 key must be 16 bytes, got {}", key.len()));
     }
-
-    // 重建预期签名
-    let mut expected_sig = vec![0x30u8; 64];
-    expected_sig[0..32].copy_from_slice(&digest[0..32]);
-    for i in 0..32 {
-        expected_sig[32 + i] = digest[31 - i];
+    if iv.len() != 16 {
+        return Err(format!("SM4 IV must be 16 bytes, got {}", iv.len()));
     }
+    let cipher = Sm4Cipher::new(key, Sm4Mode::Cbc)
+        .map_err(|e| format!("SM4 cipher init error: {}", e))?;
+    cipher.encrypt(&[], data, iv)
+        .map_err(|e| format!("SM4 encrypt error: {}", e))
+}
 
-    // 简单比较（生产环境需使用完整的 SM2 验签过程）
-    Ok(signature[0..64] == expected_sig[0..64])
+/// SM4 解密 (CBC模式, PKCS#7 自动去填充)
+///
+/// # 参数
+/// - `data`: 密文数据 (长度必须是 16 的整数倍)
+/// - `key`: 密钥 (必须 16 字节)
+/// - `iv`: 初始化向量 (必须 16 字节)
+///
+/// # 返回
+/// 明文数据
+pub fn sm4_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, String> {
+    if key.len() != 16 {
+        return Err(format!("SM4 key must be 16 bytes, got {}", key.len()));
+    }
+    if iv.len() != 16 {
+        return Err(format!("SM4 IV must be 16 bytes, got {}", iv.len()));
+    }
+    let cipher = Sm4Cipher::new(key, Sm4Mode::Cbc)
+        .map_err(|e| format!("SM4 cipher init error: {}", e))?;
+    cipher.decrypt(&[], data, iv)
+        .map_err(|e| format!("SM4 decrypt error: {}", e))
 }
 
 // ============================================================
-// SM4 对称加密 (GM/T 0002-2012) — 用于文档内容加密
-// ============================================================
-
-/// SM4 加密 (CBC模式)
-pub fn sm4_encrypt(_data: &[u8], _key: &[u8], _iv: &[u8]) -> Result<Vec<u8>, String> {
-    // FIXME: 生产环境需使用经过认证的 SM4 实现
-    // 当前返回模拟加密数据
-    let result: Vec<u8> = _data.iter().map(|b| b ^ 0xAA).collect();
-    Ok(result)
-}
-
-/// SM4 解密 (CBC模式)
-pub fn sm4_decrypt(_data: &[u8], _key: &[u8], _iv: &[u8]) -> Result<Vec<u8>, String> {
-    let result: Vec<u8> = _data.iter().map(|b| b ^ 0xAA).collect();
-    Ok(result)
-}
-
-// ============================================================
-// RSA 签名与验签 — 假数据实现
+// RSA 签名 — 假数据实现 (非国密算法, 仅用于兼容)
 // ============================================================
 
 /// RSA PKCS#1v1.5 签名
@@ -195,6 +279,10 @@ pub fn file_id_hash(data: &str) -> String {
         .to_string()
 }
 
+// ============================================================
+// 测试
+// ============================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +306,92 @@ mod tests {
         let data = b"test";
         let hash = md5_hex(data);
         assert_eq!(hash.len(), 32);
+    }
+
+    // --- SM2 签名/验签测试 ---
+
+    #[test]
+    fn test_sm2_keypair_gen() {
+        let kp = ensure_sm2_keypair();
+        assert_eq!(kp.pubkey.len(), 65); // 04 || x(32) || y(32)
+        assert_eq!(kp.pubkey[0], 0x04);  // 非压缩格式前缀
+        assert_eq!(kp.seckey.len(), 32); // 256-bit private key
+    }
+
+    #[test]
+    fn test_sm2_sign_and_verify() {
+        let msg = b"hello world, SM2 test message";
+        let sig = sm2_sign(msg, &[]).expect("SM2 sign should succeed");
+        // DER 编码的签名: SEQUENCE { r INTEGER, s INTEGER }
+        assert_eq!(sig[0], 0x30); // SEQUENCE tag
+        assert!(sig.len() >= 70 && sig.len() <= 72); // 典型 DER SM2 签名长度
+
+        let ok = sm2_verify(msg, &sig, &[]).expect("SM2 verify should not error");
+        assert!(ok, "SM2 verify should pass for valid signature");
+    }
+
+    #[test]
+    fn test_sm2_verify_wrong_data() {
+        let msg = b"original message";
+        let sig = sm2_sign(msg, &[]).expect("SM2 sign should succeed");
+
+        let ok = sm2_verify(b"tampered message", &sig, &[]).expect("SM2 verify should not error");
+        assert!(!ok, "SM2 verify should fail for tampered data");
+    }
+
+    // --- SM4 加密/解密测试 ---
+
+    #[test]
+    fn test_sm4_cbc_roundtrip() {
+        let key = [0x01u8; 16];
+        let iv = [0x02u8; 16];
+        let plaintext = b"hello world, this is a SM4 CBC test message";
+
+        let ciphertext = sm4_encrypt(plaintext, &key, &iv).expect("SM4 encrypt should succeed");
+        assert_eq!(ciphertext.len() % 16, 0); // 密文长度必须是 16 的倍数
+        assert_ne!(&ciphertext[..], &plaintext[..]); // 密文不能等于明文
+
+        let decrypted = sm4_decrypt(&ciphertext, &key, &iv).expect("SM4 decrypt should succeed");
+        assert_eq!(&decrypted[..], &plaintext[..]); // 解密后应等于明文
+    }
+
+    #[test]
+    fn test_sm4_cbc_empty() {
+        let key = [0xAAu8; 16];
+        let iv = [0xBBu8; 16];
+        let plaintext = b"";
+
+        let ciphertext = sm4_encrypt(plaintext, &key, &iv).expect("SM4 encrypt empty should succeed");
+        // 空数据加密后应有一个完整填充块 (16 字节)
+        assert_eq!(ciphertext.len(), 16);
+
+        let decrypted = sm4_decrypt(&ciphertext, &key, &iv).expect("SM4 decrypt should succeed");
+        assert!(decrypted.is_empty());
+    }
+
+    #[test]
+    fn test_sm4_cbc_exact_block() {
+        let key = [0x33u8; 16];
+        let iv = [0x44u8; 16];
+        let plaintext = [0x55u8; 16]; // 正好一个块
+
+        let ciphertext = sm4_encrypt(&plaintext, &key, &iv).expect("SM4 encrypt should succeed");
+        // 恰好一个块时, PKCS#7 会添加一个完整填充块 → 32 字节
+        assert_eq!(ciphertext.len(), 32);
+
+        let decrypted = sm4_decrypt(&ciphertext, &key, &iv).expect("SM4 decrypt should succeed");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_sm4_wrong_key_length() {
+        let result = sm4_encrypt(b"data", &[0u8; 15], &[0u8; 16]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sm4_wrong_iv_length() {
+        let result = sm4_encrypt(b"data", &[0u8; 16], &[0u8; 15]);
+        assert!(result.is_err());
     }
 }

@@ -3,27 +3,38 @@
 修复 parse_pdf_info() — 用 PDFium 解析后的 document.pages().len() 获取真实页数（5分钟）
 实现 OFD 真实渲染 — 基于 quick-xml + zip 解析 OFD 文档模型，Canvas 2D 渲染文字/图片/图形（大工程）
 实现真实签章嵌入 — 构造 SES 签章结构体，写入 OFD 签章页/签章描述（需要 GB/T 33190 标准细节）
-国密算法真实现 — 接入 sm2/sm3/sm4 Rust crate，替换 crypto.rs 中的假实现
+国密算法真实现 — 接入 sm2/sm3/sm4 Rust crate，替换 crypto.rs 中的假实现 [已完成 ✅]
 
 
 ```
 rust-wasm-seal/
 ├── Cargo.toml              # 依赖配置 (wasm-bindgen, libsm, serde, etc.)
-├── .cargo/config.toml      # WASM 编译配置
-├── build.bat / build.sh    # 构建脚本
-├── index.html              # 集成测试页面
+├── src/
+│   ├── lib.rs              # 主入口 — 暴露 60+ 个 WASM API 函数
+│   ├── types.rs            # 数据类型 (SealInfo, DocState, SignConfig...)
+│   ├── crypto.rs           # 国密算法 SM2/SM3/SM4 + SHA256/MD5
+│   ├── engine.rs           # 文档引擎 — 加载/解析/保存 PDF/OFD
+│   ├── seal.rs             # 印章引擎 — 印章嵌入/位置计算/骑缝章
+│   ├── sign.rs             # 签名引擎 — 签名计算/签章合成/云签/UKey签
+│   ├── ukey.rs             # UKey 通信 — WebSocket 代理/硬件设备交互
+│   ├── render.rs           # 渲染引擎 — PDFium 真实渲染 + Canvas 2D
+│   ├── ses.rs              # SES 电子签章数据结构 (GM/T 0031-2014)
+│   ├── pkcs7.rs            # PKCS#7/CMS SignedData 结构 (RFC 2315/5652)
+│   ├── der.rs              # ASN.1 DER 编码工具
+│   ├── ofd_parser.rs       # OFD 文档解析 (ZIP + XML)
+│   ├── ofd_sign.rs         # OFD 签章嵌入 (GB/T 33190-2016)
+│   ├── font_embed.rs       # PDF 中文字体自动嵌入 (方案 A)
+│   ├── font_provider.rs    # 字体提供器
+│   ├── utils.rs            # 工具函数 (base64, 文件下载, JSON)
+│   └── mock_seal_png.rs    # 模拟印章图像
 ├── js/
 │   └── ofd_plugin.js       # JS 桥接层 (兼容原 OFD_Plugin API)
-└── src/
-    ├── lib.rs              # 主入口 — 暴露 60+ 个 WASM API 函数
-    ├── types.rs            # 数据类型 (SealInfo, DocState, SignConfig...)
-    ├── crypto.rs           # 国密算法 SM2/SM3/SM4 + SHA256/MD5
-    ├── engine.rs           # 文档引擎 — 加载/解析/保存 PDF/OFD
-    ├── seal.rs             # 印章引擎 — 印章嵌入/位置计算/骑缝章
-    ├── sign.rs             # 签名引擎 — 签名计算/签章合成/云签/UKey签
-    ├── ukey.rs             # UKey 通信 — WebSocket 代理/硬件设备交互
-    ├── render.rs           # 渲染引擎 — Canvas 2D 文档渲染
-    └── utils.rs            # 工具函数 (base64, 文件下载, JSON)
+├── pdfium/                 # PDFium WASM 预编译产物
+├── fonts/                  # NotoSansSC 中文字体 + uni2cid.bin 映射表
+├── mock_data/              # 模拟证书/密钥/印章图像
+├── pkg/                    # Web 端 WASM 构建产物
+├── pkg_node/               # Node.js 端 WASM 构建产物
+└── scripts/                # Python 辅助脚本 (字体分析/证书生成等)
 ```
 | 分类 | 函数数量 | 关键 API |
 |------|----------|----------|
