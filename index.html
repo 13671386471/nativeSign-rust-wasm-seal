@@ -69,6 +69,19 @@
         .prop-table td { padding: 8px 4px; }
         .prop-table td:first-child { color: #999; width: 90px; vertical-align: top; }
         .prop-table td:last-child { color: #262626; word-break: break-all; }
+        /* ---- 印章选择弹框 ---- */
+        .seal-form-group { margin-bottom: 16px; }
+        .seal-form-group > label { display: block; font-size: 13px; color: #595959; margin-bottom: 6px; font-weight: 500; }
+        .seal-form-group input[type="text"] { width: 100%; padding: 8px 12px; border: 1px solid #d9d9d9; border-radius: 4px; font-size: 14px; box-sizing: border-box; }
+        .seal-form-group input[type="text"]:focus { border-color: #1890ff; outline: none; box-shadow: 0 0 0 2px rgba(24,144,255,0.1); }
+        .seal-form-group input[type="file"] { font-size: 13px; }
+        .seal-preview { width: 120px; height: 120px; border: 2px dashed #d9d9d9; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-top: 8px; overflow: hidden; background: #fafafa; }
+        .seal-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
+        .seal-preview .placeholder { color: #bbb; font-size: 12px; text-align: center; line-height: 1.6; }
+        .btn-primary { background: #1890ff !important; color: white !important; border-color: #1890ff !important; }
+        .btn-primary:hover { background: #40a9ff !important; border-color: #40a9ff !important; }
+        /* ---- Toast ---- */
+        #toast { position: fixed; top: 24px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.78); color: #fff; padding: 10px 28px; border-radius: 6px; font-size: 14px; z-index: 200000; display: none; opacity: 0; transition: opacity 0.3s; pointer-events: none; }
     </style>
 </head>
 <body>
@@ -85,28 +98,28 @@
             <div class="config-row">
                 <div>
                     <label>输出版式:</label>
-                    <select id="fileFormat">
+                    <select id="fileFormat" onchange="applyConfig()">
                         <option value="pdf">PDF</option>
                         <option value="ofd">OFD</option>
                     </select>
                 </div>
                 <div>
                     <label>证书算法:</label>
-                    <select id="algorithm">
+                    <select id="algorithm" onchange="applyConfig()">
                         <option value="sm2">SM2 (国密)</option>
                         <option value="rsa">RSA (国际)</option>
                     </select>
                 </div>
                 <div>
                     <label>签署方式:</label>
-                    <select id="signMode">
+                    <select id="signMode" onchange="applyConfig()">
                         <option value="cloud">云签</option>
                         <option value="ukey">UKey</option>
                     </select>
                 </div>
                 <div>
                     <label>国密章:</label>
-                    <input type="checkbox" id="isSm2Seal">
+                    <input type="checkbox" id="isSm2Seal" onchange="applyConfig()">
                 </div>
                 <button onclick="applyConfig()">应用配置</button>
             </div>
@@ -120,8 +133,9 @@
             <button onclick="zoomIn()" title="放大">放大 +</button>
             <button onclick="zoomOut()" title="缩小">缩小 -</button>
             <button onclick="fitWidth()" title="满宽">满宽</button>
-            <button onclick="saveFile()" title="保存">保存</button>
-            <button onclick="signSeal()" title="签章">签章</button>
+            <button onclick="saveFile()" title="保存并下载">保存</button>
+            <button onclick="signSeal()" title="盖章">签章</button>
+            <button onclick="embedSignatures()" title="嵌入数字签名">嵌入签名</button>
         </div>
 
         <!-- 信息面板 -->
@@ -205,6 +219,40 @@
             </div>
         </div>
     </div>
+
+    <!-- 印章选择弹框 -->
+    <div class="modal-overlay" id="sealModal">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3>选择印章</h3>
+                <button class="modal-close" onclick="closeModal('sealModal')">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="seal-form-group">
+                    <label>印章图片 (PNG/JPG)</label>
+                    <input type="file" id="sealImageFile" accept="image/png,image/jpeg" onchange="previewSealImage(this)">
+                    <div class="seal-preview" id="sealPreview">
+                        <div class="placeholder">选择图片上传<br>或使用默认印章</div>
+                    </div>
+                </div>
+                <div class="seal-form-group">
+                    <label>印章名称</label>
+                    <input type="text" id="inputSealName" placeholder="如: 公章 / 合同专用章" value="电子印章">
+                </div>
+                <div class="seal-form-group">
+                    <label>签署人</label>
+                    <input type="text" id="inputSignerName" placeholder="请输入签署人姓名" value="测试用户">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeModal('sealModal')">取消</button>
+                <button class="btn-primary" onclick="confirmSeal()">确认落章</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast 通知 -->
+    <div id="toast"></div>
 
     <!-- ====== 第1步: 加载 PDFium WASM (必须先于 Rust WASM 加载) ====== -->
     <script>
@@ -712,6 +760,7 @@
                     document.getElementById('infoPages').textContent = pages;
                     document.getElementById('infoSize').textContent = size + ' KB';
                     document.getElementById('signConfig').style.display = 'block';
+                    applyConfig(); // 自动应用默认配置到引擎
 
                     // 读取已有签章数量
                     try {
@@ -774,20 +823,184 @@
 
         async function saveFile() {
             const plugin = await getPlugin();
-            const result = await plugin.SaveTo('signed_document', 'pdf', 0);
+            const format = document.getElementById('fileFormat').value;
+            const fileName = 'signed_document.' + format;
+
+            showToast('正在保存并嵌入签名...');
+
+            const result = await plugin.SaveTo(fileName, format, 0);
             if (result === '1') {
-                alert('文件保存成功!');
+                // 获取文档数据并下载
+                const docData = await plugin.GetDocumentData();
+                if (docData && docData.length > 0) {
+                    const blob = new Blob([docData], { type: 'application/' + format });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = fileName;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    showToast('文件已保存并下载 (' + format.toUpperCase() + ', ' + (docData.length / 1024).toFixed(1) + ' KB)');
+
+                    // 更新签章计数
+                    try {
+                        const sealCount = await plugin.getSignaturesCount('');
+                        document.getElementById('infoSeals').textContent = sealCount;
+                        const sealJson = await plugin.GetSealInfoJson();
+                        if (sealJson) window.__sealInfo = JSON.parse(sealJson);
+                    } catch(e) {}
+                } else {
+                    showToast('保存成功，但获取文件数据失败');
+                }
             } else {
-                alert('保存失败');
+                showToast('保存失败');
             }
         }
 
+        // ============================================================
+        // 签章流程: 弹出印章选择 → 落章 → 嵌入签名
+        // ============================================================
+
+        let pendingSealImageB64 = '';
+
         async function signSeal() {
+            pendingSealImageB64 = '';
+            document.getElementById('sealImageFile').value = '';
+            document.getElementById('sealPreview').innerHTML = '<div class="placeholder">选择图片上传<br>或使用默认印章</div>';
+            document.getElementById('sealModal').classList.add('active');
+        }
+
+        function previewSealImage(input) {
+            const file = input.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                pendingSealImageB64 = e.target.result;
+                document.getElementById('sealPreview').innerHTML = '<img src="' + e.target.result + '">';
+            };
+            reader.readAsDataURL(file);
+        }
+
+        /// 生成默认圆形印章 PNG (canvas → base64 data URL)
+        function generateDefaultSeal(text) {
+            const size = 120;
+            const canvas = document.createElement('canvas');
+            canvas.width = size;
+            canvas.height = size;
+            const ctx = canvas.getContext('2d');
+
+            // 透明背景
+            ctx.clearRect(0, 0, size, size);
+
+            // 外圈圆
+            ctx.strokeStyle = '#D81E06';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(size / 2, size / 2, size / 2 - 5, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // 内圈
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(size / 2, size / 2, size / 2 - 13, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // 中心五角星
+            ctx.fillStyle = '#D81E06';
+            ctx.font = 'bold 20px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('\u2605', size / 2, size / 2 - 14);
+
+            // 印章文字
+            ctx.fillStyle = '#D81E06';
+            ctx.font = '12px sans-serif';
+            const name = text || '电子签章';
+            ctx.fillText(name, size / 2, size / 2 + 14);
+
+            return canvas.toDataURL('image/png');
+        }
+
+        async function confirmSeal() {
+            const sealName = document.getElementById('inputSealName').value || '电子印章';
+            const signerName = document.getElementById('inputSignerName').value || '测试用户';
+            const algorithm = document.getElementById('algorithm').value;
+
+            // 确定印章图片
+            let sealImageDataUrl = pendingSealImageB64;
+            if (!sealImageDataUrl) {
+                // 未上传图片，生成默认印章
+                sealImageDataUrl = generateDefaultSeal(signerName);
+            }
+
+            // 提取纯 base64 (去掉 data URL 前缀)
+            const sealImageB64Clean = sealImageDataUrl.includes(',')
+                ? sealImageDataUrl.split(',')[1]
+                : sealImageDataUrl;
+
+            // 设置印章信息到 WASM 引擎
             const plugin = await getPlugin();
+            plugin.SetCurrentSealInfo(sealName, sealImageB64Clean, signerName, algorithm);
+
+            closeModal('sealModal');
+
+            // 进入落章模式
             isSelectingPoint = true;
-            const sealImage = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMzAiIHN0cm9rZT0iI0Q4MUUwNiIgc3Ryb2tlLXdpZHRoPSIzIiBmaWxsPSJub25lIi8+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMjIiIHN0cm9rZT0iI0Q4MUUwNiIgc3Ryb2tlLXdpZHRoPSIxIiBmaWxsPSJub25lIi8+PHRleHQgeD0iMzIiIHk9IjM3IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjEyIiBmaWxsPSIjRDgxRTA2Ij7lsI/pmo88L3RleHQ+PC9zdmc+';
-            await plugin.SelectPoint(sealImage);
-            alert('请在文档上点击落章位置');
+            await plugin.SelectPoint(sealImageDataUrl);
+            showToast('请在文档上点击落章位置');
+        }
+
+        /// 应用签署配置
+        function applyConfig() {
+            const algorithm = document.getElementById('algorithm').value;
+            const isSm2Seal = document.getElementById('isSm2Seal').checked;
+            const signMode = document.getElementById('signMode').value;
+            const fileFormat = document.getElementById('fileFormat').value;
+
+            const plugin = window.OFD_Plugin;
+            if (plugin && plugin.SetSignConfig) {
+                plugin.SetSignConfig(algorithm, isSm2Seal, signMode, fileFormat);
+                showToast('配置已应用: ' + algorithm.toUpperCase() + ' / ' + fileFormat.toUpperCase());
+            }
+        }
+
+        /// 嵌入数字签名 (不保存文件)
+        async function embedSignatures() {
+            const plugin = await getPlugin();
+            showToast('正在嵌入数字签名...');
+            try {
+                const count = await plugin.EmbedSignatures();
+                if (count > 0) {
+                    showToast('已嵌入 ' + count + ' 枚数字签名');
+                    const sealJson = await plugin.GetSealInfoJson();
+                    if (sealJson) window.__sealInfo = JSON.parse(sealJson);
+                    const sealCount = await plugin.getSignaturesCount('');
+                    document.getElementById('infoSeals').textContent = sealCount;
+                } else if (count === 0) {
+                    showToast('没有需要嵌入的签章');
+                } else {
+                    showToast('嵌入签名失败');
+                }
+            } catch(e) {
+                showToast('嵌入签名错误: ' + e.message);
+            }
+        }
+
+        /// Toast 通知
+        let __toastTimer = null;
+        function showToast(msg) {
+            const el = document.getElementById('toast');
+            if (!el) { alert(msg); return; }
+            el.textContent = msg;
+            el.style.display = 'block';
+            el.style.opacity = '1';
+            if (__toastTimer) clearTimeout(__toastTimer);
+            __toastTimer = setTimeout(() => {
+                el.style.opacity = '0';
+                setTimeout(() => { el.style.display = 'none'; }, 300);
+            }, 2800);
         }
 
         // ============================================================
@@ -1122,25 +1335,44 @@
             try {
                 const obj = JSON.parse(param);
                 const plugin = await getPlugin();
-                const page = await plugin.GetCurrentPage();
-                const rect = document.getElementById('screen').getBoundingClientRect();
-                const pointX = Math.floor((obj.left / rect.width) * 50000);
-                const pointY = Math.floor((obj.top / rect.height) * 50000);
+                const page = obj.pageindex !== undefined ? obj.pageindex : await plugin.GetCurrentPage();
 
-                const cPages = `${page},${pointX},5,5,${pointY},MOCK_SEAL_DATA`;
+                // 查找点击所在的 canvas，计算相对坐标
+                const screen = document.getElementById('screen');
+                const screenRect = screen.getBoundingClientRect();
+                const canvas = screen.querySelector('canvas[data-page="' + page + '"]');
+
+                let pointX, pointY;
+                if (canvas) {
+                    const canvasRect = canvas.getBoundingClientRect();
+                    const xInCanvas = obj.left - (canvasRect.left - screenRect.left);
+                    const yInCanvas = obj.top - (canvasRect.top - screenRect.top);
+                    // 转换为 50000 比例坐标系 (引擎内部: x_pt = x_raw / 50000.0 * 595.0)
+                    pointX = Math.floor((xInCanvas / canvasRect.width) * 50000);
+                    pointY = Math.floor((yInCanvas / canvasRect.height) * 50000);
+                } else {
+                    pointX = Math.floor((obj.left / screenRect.width) * 50000);
+                    pointY = Math.floor((obj.top / screenRect.height) * 50000);
+                }
+
+                const cPages = page + ',' + pointX + ',5,5,' + pointY;
                 const ret = await plugin.AddSeal(cPages, '', 'AUTO_ADD_SEAL_FROM_PATH');
-                if (ret !== 0) {
+                if (ret !== 0 && ret !== -1) {
                     document.getElementById('infoSeals').textContent =
                         parseInt(document.getElementById('infoSeals').textContent || '0') + 1;
-                    alert('落章成功');
+                    // 刷新签章位置信息
+                    const sealJson = await plugin.GetSealInfoJson();
+                    if (sealJson) window.__sealInfo = JSON.parse(sealJson);
+                    showToast('落章成功，点击"保存"或"嵌入签名"完成签署');
                 } else {
-                    alert('落章失败');
+                    showToast('落章失败: ' + ret);
                 }
                 isSelectingPoint = false;
                 await plugin.CloseSelectPoint();
             } catch (e) {
                 console.error('落章处理错误:', e);
                 isSelectingPoint = false;
+                showToast('落章错误: ' + e.message);
             }
         };
 

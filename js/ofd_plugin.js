@@ -124,6 +124,34 @@ function createOFDPlugin(wasmModule) {
     return mod.save_to(fileName, format, flags);
   }
 
+  // ============================================================
+  // SES 签章 API (新增)
+  // ============================================================
+
+  function SetCurrentSealInfo(sealName, sealImageBase64, signerName, algorithm) {
+    return mod.set_current_seal_info(sealName, sealImageBase64, signerName, algorithm);
+  }
+
+  async function GetDocumentData() {
+    return mod.get_document_data();
+  }
+
+  function SetSignConfig(algorithm, isSm2Seal, signMode, fileFormat) {
+    return mod.set_sign_config(algorithm, isSm2Seal, signMode, fileFormat);
+  }
+
+  async function EmbedSignatures() {
+    return mod.embed_signatures();
+  }
+
+  async function GetSesInfo() {
+    return mod.get_ses_info();
+  }
+
+  function BuildSesSeal(sealName, sealImageBase64, algorithm) {
+    return mod.build_ses_seal(sealName, sealImageBase64, algorithm);
+  }
+
   async function CloseDoc(flags) {
     return mod.close_doc(flags);
   }
@@ -462,6 +490,14 @@ function createOFDPlugin(wasmModule) {
 
     // 工具
     version,
+
+    // SES 签章 (新增)
+    SetCurrentSealInfo,
+    GetDocumentData,
+    SetSignConfig,
+    EmbedSignatures,
+    GetSesInfo,
+    BuildSesSeal,
   };
 }
 

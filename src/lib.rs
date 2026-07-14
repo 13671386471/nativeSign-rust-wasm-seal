@@ -27,6 +27,9 @@
 
 mod types;
 mod crypto;
+mod der;
+mod ses;
+mod pkcs7;
 mod engine;
 mod seal;
 mod sign;
@@ -34,6 +37,7 @@ mod ukey;
 mod render;
 mod utils;
 mod ofd_parser;
+mod ofd_sign;
 mod font_provider;
 mod font_embed;
 
@@ -251,6 +255,67 @@ pub async fn set_doc_property(key: &str, value: &str) {
 #[wasm_bindgen]
 pub async fn save_to(file_name: &str, format: &str, flags: i32) -> Result<String, JsValue> {
     with_engine(|engine| {
+        // 如果有未嵌入的印章, 先嵌入到文档中
+        let has_unsigned_seals = engine.doc.state.seals.iter().any(|s| !s.signed);
+        if has_unsigned_seals {
+            let doc_data = engine.doc.state.raw_data.clone();
+            let seals = engine.doc.state.seals.clone();
+            let doc_type = engine.doc.state.doc_type;
+
+            // 为每枚印章构建 PKCS#7 签名值
+            let algorithm = match engine.sign_config.algorithm {
+                types::Algorithm::Rsa => ses::SealAlgorithm::Rsa,
+                types::Algorithm::Sm2 => ses::SealAlgorithm::Sm2,
+            };
+            let mut signed_seals: Vec<types::PlacedSeal> = Vec::new();
+            for mut seal in seals {
+                if !seal.signed {
+                    // 构建 SES 参数
+                    let ses_params = ses::ses_params_from_seal_info(&seal.seal_info, algorithm);
+
+                    // 构建 MOCK SES_Signature
+                    let ses_sig_der = ses::build_mock_ses_signature(&ses_params, &doc_data);
+
+                    // 计算文档摘要
+                    let doc_hash = match algorithm {
+                        ses::SealAlgorithm::Sm2 => crypto::sm3_hash(&doc_data),
+                        ses::SealAlgorithm::Rsa => crypto::sha256(&doc_data),
+                    };
+
+                    // 构建 PKCS#7
+                    let pkcs7_der = pkcs7::build_mock_pkcs7(
+                        algorithm,
+                        &ses_sig_der,
+                        &doc_hash,
+                        ses_params.sign_time,
+                    );
+
+                    seal.signature = Some(pkcs7_der);
+                    seal.signed = true;
+                }
+                signed_seals.push(seal);
+            }
+
+            // 嵌入签章到文档
+            let embedded = seal::SealEngine::embed_seals_to_document(
+                &doc_data, &signed_seals, doc_type, algorithm
+            ).map_err(|e| {
+                web_sys::console::error_1(&format!("[save_to] 签章嵌入失败: {}", e).into());
+                JsValue::from_str(&e)
+            })?;
+
+            // 更新文档数据
+            engine.doc.state.raw_data = embedded.clone();
+            engine.doc.state.seals = signed_seals;
+            engine.doc.state.signed_count = engine.doc.state.seals.iter()
+                .filter(|s| s.signed).count() as u32;
+
+            web_sys::console::log_1(&format!(
+                "[save_to] 签章嵌入完成, 文档大小: {} bytes",
+                engine.doc.state.raw_data.len()
+            ).into());
+        }
+
         engine.doc.save_to(file_name, format, flags)
             .map_err(|e| JsValue::from_str(&e))
     })
@@ -309,8 +374,7 @@ pub async fn get_create_seal(
 /// 添加印章到文档
 #[wasm_bindgen]
 pub async fn add_seal(c_pages: &str, _reserved: &str, _mode: &str) -> i32 {
-    // 解析 sealData 从 cPages 最后一部分
-    with_engine(|engine| {
+    let result = with_engine(|engine| {
         if let Some(seal_info) = &engine.current_seal_info {
             let sign_data = seal_info.sign_data.as_deref().unwrap_or("");
             let mut seals = std::mem::take(&mut engine.doc.state.seals);
@@ -320,14 +384,37 @@ pub async fn add_seal(c_pages: &str, _reserved: &str, _mode: &str) -> i32 {
             match result {
                 Ok(count) => {
                     engine.doc.state.seal_count = count as u32;
+
+                    // 准备签名数据 — 存储文档数据和印章信息到 SignEngine
+                    let doc_data = engine.doc.state.raw_data.clone();
+                    let last_seal = engine.doc.state.seals.last().cloned();
+                    if let Some(seal) = last_seal {
+                        engine.sign.prepare_for_signing(doc_data, seal.seal_info.clone());
+                    }
+
+                    web_sys::console::log_1(&format!(
+                        "[add_seal] 印章已添加, 总数={}, 页码={}, 位置=({:.1},{:.1})",
+                        count,
+                        engine.doc.state.seals.last().map(|s| s.page_index).unwrap_or(0),
+                        engine.doc.state.seals.last().map(|s| s.x).unwrap_or(0.0),
+                        engine.doc.state.seals.last().map(|s| s.y).unwrap_or(0.0),
+                    ).into());
+
                     count as i32
                 }
-                Err(_) => -1,
+                Err(e) => {
+                    web_sys::console::error_1(&format!("[add_seal] 印章添加失败: {}", e).into());
+                    -1
+                }
             }
         } else {
+            web_sys::console::error_1(&"[add_seal] current_seal_info 未设置".into());
             -1
         }
-    })
+    });
+    // 触发重绘以显示新添加的印章
+    refresh_render();
+    result
 }
 
 /// 获取最后添加的印章
@@ -809,5 +896,308 @@ pub fn preprocess_pdf_for_cjk(pdf: Vec<u8>) -> Vec<u8> {
 /// 获取引擎版本
 #[wasm_bindgen]
 pub fn version() -> String {
-    format!("dianju-wasm-seal v{} (Rust WASM)", env!("CARGO_PKG_VERSION"))
+    format!("dianju-wasm-seal v{} (Rust WASM + SES)", env!("CARGO_PKG_VERSION"))
+}
+
+// ============================================================
+// SES 签章 API — 直接操作 SES 结构
+// ============================================================
+
+/// 构建 SES 电子印章 (Seal.esl) 并返回 base64
+///
+/// 使用 MOCK 证书和签名, 生成完整的 SES_Seal DER 结构
+#[wasm_bindgen]
+pub fn build_ses_seal(
+    seal_name: &str,
+    seal_image_base64: &str,
+    algorithm: &str,
+) -> String {
+    let algo = if algorithm == "rsa" {
+        ses::SealAlgorithm::Rsa
+    } else {
+        ses::SealAlgorithm::Sm2
+    };
+
+    let seal_image = if seal_image_base64.is_empty() {
+        ses::MOCK_SEAL_PNG.to_vec()
+    } else {
+        base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            seal_image_base64
+        ).unwrap_or_else(|_| ses::MOCK_SEAL_PNG.to_vec())
+    };
+
+    let params = ses::SesParams {
+        algorithm: algo,
+        seal_name: seal_name.to_string(),
+        seal_image,
+        ..Default::default()
+    };
+
+    let seal_der = ses::build_mock_ses_seal(&params);
+    base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &seal_der
+    )
+}
+
+/// 构建 SES 电子签名 (SES_Signature) 并返回 base64
+///
+/// 使用 MOCK 签名, 生成完整的 SES_Signature DER 结构
+#[wasm_bindgen]
+pub fn build_ses_signature(doc_data_base64: &str, algorithm: &str) -> String {
+    let algo = if algorithm == "rsa" {
+        ses::SealAlgorithm::Rsa
+    } else {
+        ses::SealAlgorithm::Sm2
+    };
+
+    let doc_data = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        doc_data_base64
+    ).unwrap_or_default();
+
+    let params = ses::SesParams {
+        algorithm: algo,
+        ..Default::default()
+    };
+
+    let sig_der = ses::build_mock_ses_signature(&params, &doc_data);
+    base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &sig_der
+    )
+}
+
+/// 构建 PKCS#7 SignedData (包含 SES_Signature) 并返回 base64
+#[wasm_bindgen]
+pub fn build_pkcs7_signature(doc_data_base64: &str, algorithm: &str) -> String {
+    let algo = if algorithm == "rsa" {
+        ses::SealAlgorithm::Rsa
+    } else {
+        ses::SealAlgorithm::Sm2
+    };
+
+    let doc_data = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        doc_data_base64
+    ).unwrap_or_default();
+
+    let params = ses::SesParams {
+        algorithm: algo,
+        ..Default::default()
+    };
+
+    let ses_sig = ses::build_mock_ses_signature(&params, &doc_data);
+    let doc_hash = match algo {
+        ses::SealAlgorithm::Sm2 => crypto::sm3_hash(&doc_data),
+        ses::SealAlgorithm::Rsa => crypto::sha256(&doc_data),
+    };
+
+    let pkcs7_der = pkcs7::build_mock_pkcs7(
+        algo,
+        &ses_sig,
+        &doc_hash,
+        params.sign_time,
+    );
+
+    base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &pkcs7_der
+    )
+}
+
+/// 嵌入签章到当前文档 (直接调用, 不通过 save_to)
+///
+/// 为当前文档中的所有未签章印章构建 SES 结构并嵌入
+#[wasm_bindgen]
+pub async fn embed_signatures() -> Result<i32, JsValue> {
+    with_engine(|engine| {
+        let seals = engine.doc.state.seals.clone();
+        if seals.is_empty() {
+            return Ok(0);
+        }
+
+        let doc_data = engine.doc.state.raw_data.clone();
+        let doc_type = engine.doc.state.doc_type;
+
+        // 为每枚印章构建签名
+        let algorithm = match engine.sign_config.algorithm {
+            types::Algorithm::Rsa => ses::SealAlgorithm::Rsa,
+            types::Algorithm::Sm2 => ses::SealAlgorithm::Sm2,
+        };
+        let mut signed_seals: Vec<types::PlacedSeal> = Vec::new();
+        for mut seal in seals {
+            if !seal.signed {
+                let ses_params = ses::ses_params_from_seal_info(&seal.seal_info, algorithm);
+
+                let ses_sig_der = ses::build_mock_ses_signature(&ses_params, &doc_data);
+                let doc_hash = match algorithm {
+                    ses::SealAlgorithm::Sm2 => crypto::sm3_hash(&doc_data),
+                    ses::SealAlgorithm::Rsa => crypto::sha256(&doc_data),
+                };
+
+                let pkcs7_der = pkcs7::build_mock_pkcs7(
+                    algorithm,
+                    &ses_sig_der,
+                    &doc_hash,
+                    ses_params.sign_time,
+                );
+
+                seal.signature = Some(pkcs7_der);
+                seal.signed = true;
+            }
+            signed_seals.push(seal);
+        }
+
+        let embedded = seal::SealEngine::embed_seals_to_document(
+            &doc_data, &signed_seals, doc_type, algorithm
+        ).map_err(|e| {
+            web_sys::console::error_1(&format!("[embed_signatures] 嵌入失败: {}", e).into());
+            JsValue::from_str(&e)
+        })?;
+
+        engine.doc.state.raw_data = embedded;
+        engine.doc.state.seals = signed_seals;
+        engine.doc.state.signed_count = engine.doc.state.seals.iter()
+            .filter(|s| s.signed).count() as u32;
+
+        web_sys::console::log_1(&format!(
+            "[embed_signatures] 完成, {} 枚签章已嵌入",
+            engine.doc.state.signed_count
+        ).into());
+
+        Ok(engine.doc.state.signed_count as i32)
+    })
+}
+
+/// 设置当前印章信息 (在调用 add_seal 之前必须调用)
+///
+/// 由前端在用户确认印章图片和签署信息后调用,
+/// 后续 add_seal 会使用此 SealInfo 创建 PlacedSeal
+#[wasm_bindgen]
+pub fn set_current_seal_info(
+    seal_name: &str,
+    seal_image_base64: &str,
+    signer_name: &str,
+    algorithm: &str,
+) {
+    with_engine(|engine| {
+        // 同步签章算法到引擎配置
+        let algo = if algorithm == "rsa" {
+            types::Algorithm::Rsa
+        } else {
+            types::Algorithm::Sm2
+        };
+        engine.sign_config.algorithm = algo;
+
+        // 去掉 data URL 前缀 (如果有)
+        let seal_image_clean = if seal_image_base64.starts_with("data:") {
+            seal_image_base64.split(',').nth(1).unwrap_or("").to_string()
+        } else {
+            seal_image_base64.to_string()
+        };
+
+        let seal_id = format!("SEAL_{}", js_sys::Date::now() as u64);
+
+        engine.current_seal_info = Some(types::SealInfo {
+            origin: "local".to_string(),
+            seal_id,
+            seal_name: if seal_name.is_empty() { "电子印章".to_string() } else { seal_name.to_string() },
+            width: 40.0,
+            height: 40.0,
+            seal_type: Some(1),
+            seal_image: seal_image_clean,
+            sign_cert_sn: None,
+            sign_data: None,
+            sign_cert: None,
+            seal_start_time: None,
+            seal_end_time: None,
+            signer_name: if signer_name.is_empty() { None } else { Some(signer_name.to_string()) },
+            sign_time: None,
+            sign_method: None,
+            cert_issuer: None,
+            cert_subject: None,
+            cert_start_time: None,
+            cert_end_time: None,
+            cert_algorithm: None,
+            cert_data: None,
+        });
+
+        web_sys::console::log_1(&format!(
+            "[set_current_seal_info] 印章: '{}', 签署人: '{}', 算法: {:?}",
+            seal_name, signer_name, algo
+        ).into());
+    });
+}
+
+/// 获取当前文档数据 (用于前端下载)
+#[wasm_bindgen]
+pub async fn get_document_data() -> Vec<u8> {
+    with_engine(|engine| engine.doc.state.raw_data.clone())
+}
+
+/// 设置签署配置 (由前端 applyConfig 调用)
+#[wasm_bindgen]
+pub fn set_sign_config(algorithm: &str, is_sm2_seal: bool, sign_mode: &str, file_format: &str) {
+    with_engine(|engine| {
+        engine.sign_config.algorithm = if algorithm == "rsa" {
+            types::Algorithm::Rsa
+        } else {
+            types::Algorithm::Sm2
+        };
+        engine.sign_config.is_sm2_seal = is_sm2_seal;
+        engine.sign_config.sign_mode = match sign_mode {
+            "ukey" => types::SignMode::Ukey,
+            "mobile" => types::SignMode::Mobile,
+            _ => types::SignMode::Cloud,
+        };
+        engine.sign_config.file_format = if file_format == "ofd" {
+            types::DocType::Ofd
+        } else {
+            types::DocType::Pdf
+        };
+
+        // 同步到 SignEngine 的算法
+        let seal_algo = match engine.sign_config.algorithm {
+            types::Algorithm::Rsa => ses::SealAlgorithm::Rsa,
+            types::Algorithm::Sm2 => ses::SealAlgorithm::Sm2,
+        };
+        engine.sign.set_algorithm(seal_algo);
+
+        web_sys::console::log_1(&format!(
+            "[set_sign_config] 算法={:?}, 国密章={}, 签署模式={:?}, 输出格式={:?}",
+            engine.sign_config.algorithm,
+            is_sm2_seal,
+            engine.sign_config.sign_mode,
+            engine.sign_config.file_format
+        ).into());
+    });
+}
+
+/// 获取当前文档的 SES 签章信息 (JSON)
+#[wasm_bindgen]
+pub async fn get_ses_info() -> String {
+    with_engine(|engine| {
+        let seals = &engine.doc.state.seals;
+        let infos: Vec<serde_json::Value> = seals.iter().map(|s| {
+            serde_json::json!({
+                "sealId": s.id,
+                "sealName": s.seal_info.seal_name,
+                "page": s.page_index,
+                "position": {"x": s.x, "y": s.y, "w": s.width, "h": s.height},
+                "signed": s.signed,
+                "algorithm": "SM2-SM3",
+                "certSubject": ses::get_mock_cert_subject(ses::SealAlgorithm::Sm2),
+                "certIssuer": ses::get_mock_cert_issuer(ses::SealAlgorithm::Sm2),
+                "certSN": ses::get_mock_cert_sn(ses::SealAlgorithm::Sm2),
+            })
+        }).collect();
+
+        serde_json::to_string(&serde_json::json!({
+            "count": seals.len(),
+            "signed": seals.iter().filter(|s| s.signed).count(),
+            "seals": infos,
+        })).unwrap_or_default()
+    })
 }

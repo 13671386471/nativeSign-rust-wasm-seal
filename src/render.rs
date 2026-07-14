@@ -7,7 +7,7 @@
 //!   - 印章叠加: Canvas 覆盖层绘制
 
 use wasm_bindgen::prelude::*;
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
+use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 use pdfium_render::prelude::*;
 use crate::types::*;
 use crate::ofd_parser;
@@ -421,9 +421,11 @@ impl RenderEngine {
         web_sys::console::log_1(&format!("[render_page] page[{}] put_image_data OK", page_idx).into());
 
         // 印章叠加
+        let pdf_pw = page.width().value as f64;
+        let pdf_ph = page.height().value as f64;
         for seal in &doc_state.seals {
             if seal.page_index == page_idx {
-                self.render_seal(&ctx, seal, 0.0, 0.0, bmp_w as f64, bmp_h as f64)?;
+                self.render_seal(&ctx, seal, pdf_pw, pdf_ph, bmp_w as f64, bmp_h as f64)?;
             }
         }
 
@@ -688,20 +690,62 @@ impl RenderEngine {
         &self,
         ctx: &CanvasRenderingContext2d,
         seal: &PlacedSeal,
-        page_x: f64,
-        page_y: f64,
-        page_w: f64,
-        page_h: f64,
+        pdf_page_w: f64,
+        pdf_page_h: f64,
+        bmp_w: f64,
+        bmp_h: f64,
     ) -> Result<(), JsValue> {
-        let sx = page_x + (seal.x / page_w) * page_w;
-        let sy = page_y + (seal.y / page_h) * page_h;
-        let sw = seal.width * self.config.zoom;
-        let sh = seal.height * self.config.zoom;
+        // seal.x/y 是 PDF 点坐标 (0~595, 0~842), 原点在左上角 (由点击坐标转换而来)
+        // 需要缩放到位图像素坐标
+        let scale_x = bmp_w / pdf_page_w;
+        let scale_y = bmp_h / pdf_page_h;
+        let sx = seal.x * scale_x;
+        let sy = seal.y * scale_y;
+        let sw = seal.width * scale_x;
+        let sh = seal.height * scale_y;
 
         let cx = sx + sw / 2.0;
         let cy = sy + sh / 2.0;
         let radius = sw.min(sh) / 2.0;
 
+        // 如果有印章图片, 尝试绘制
+        if !seal.seal_info.seal_image.is_empty() {
+            // 解码 base64 PNG 并绘制
+            use base64::Engine;
+            if let Ok(img_bytes) = base64::engine::general_purpose::STANDARD.decode(&seal.seal_info.seal_image) {
+                // 用 PNG 解码获取像素数据
+                if let Some((iw, ih, rgba)) = decode_png_to_rgba(&img_bytes) {
+                    // 创建临时 canvas 绘制图片 (带 alpha 通道)
+                    let window = web_sys::window().ok_or(JsValue::from_str("无 window"))?;
+                    let document = window.document().ok_or(JsValue::from_str("无 document"))?;
+                    if let Ok(tmp_canvas) = document.create_element("canvas") {
+                        let tmp: HtmlCanvasElement = tmp_canvas.dyn_into().map_err(|_| JsValue::from_str("canvas 转换失败"))?;
+                        tmp.set_width(iw);
+                        tmp.set_height(ih);
+                        if let Ok(tmp_ctx_obj) = tmp.get_context("2d") {
+                            if let Some(tmp_ctx_obj) = tmp_ctx_obj {
+                                if let Ok(tmp_ctx) = tmp_ctx_obj.dyn_into::<CanvasRenderingContext2d>() {
+                                    // 创建 ImageData 并绘制
+                                    if let Ok(img_data) = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
+                                        wasm_bindgen::Clamped(&rgba), iw, ih,
+                                    ) {
+                                        let _ = tmp_ctx.put_image_data(&img_data, 0.0, 0.0);
+                                        // 缩放绘制到主 canvas
+                                        let _ = ctx.draw_image_with_html_canvas_element_and_dw_and_dh(
+                                            &tmp, sx, sy, sw, sh,
+                                        );
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 回退: 绘制圆形+文字
+        ctx.save();
         ctx.begin_path();
         ctx.arc(cx, cy, radius, 0.0, std::f64::consts::PI * 2.0)
             .map_err(|_| JsValue::from_str("绘制印章失败"))?;
@@ -710,16 +754,18 @@ impl RenderEngine {
         ctx.set_line_width(2.0);
         ctx.stroke();
 
-        ctx.set_font("10px sans-serif");
+        ctx.set_font(format!("{}px sans-serif", (radius * 0.3) as i32).as_str());
         ctx.set_fill_style_str("#D81E06");
         ctx.set_text_align("center");
+        ctx.set_text_baseline("middle");
         ctx.fill_text(&seal.seal_info.seal_name, cx, cy).ok();
 
         if seal.signed {
             ctx.set_fill_style_str("#52C41A");
-            ctx.set_font("16px sans-serif");
-            ctx.fill_text("✓", cx + radius * 0.7, cy - radius * 0.7).ok();
+            ctx.set_font(format!("{}px sans-serif", (radius * 0.5) as i32).as_str());
+            ctx.fill_text("\u{2713}", cx + radius * 0.7, cy - radius * 0.7).ok();
         }
+        ctx.restore();
 
         Ok(())
     }
@@ -980,4 +1026,96 @@ fn tokenize_path(data: &str) -> Vec<String> {
 /// 判断 token 是否为数字
 fn is_num(s: &str) -> bool {
     s.parse::<f64>().is_ok()
+}
+
+/// 解码 PNG 为 RGBA 像素数据 (用于印章渲染)
+fn decode_png_to_rgba(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    if data.len() < 8 || &data[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+
+    let mut pos = 8;
+    let mut width = 0u32;
+    let mut height = 0u32;
+    let mut bit_depth = 0u8;
+    let mut color_type = 0u8;
+    let mut idat_data: Vec<u8> = Vec::new();
+
+    while pos < data.len() {
+        if pos + 8 > data.len() { break; }
+        let length = u32::from_be_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+        let chunk_type = &data[pos+4..pos+8];
+        let chunk_data_start = pos + 8;
+
+        if chunk_data_start + length > data.len() { break; }
+
+        match chunk_type {
+            b"IHDR" => {
+                width = u32::from_be_bytes([data[chunk_data_start], data[chunk_data_start+1], data[chunk_data_start+2], data[chunk_data_start+3]]);
+                height = u32::from_be_bytes([data[chunk_data_start+4], data[chunk_data_start+5], data[chunk_data_start+6], data[chunk_data_start+7]]);
+                bit_depth = data[chunk_data_start+8];
+                color_type = data[chunk_data_start+9];
+            }
+            b"IDAT" => {
+                idat_data.extend_from_slice(&data[chunk_data_start..chunk_data_start+length]);
+            }
+            b"IEND" => break,
+            _ => {}
+        }
+
+        pos = chunk_data_start + length + 4; // skip CRC
+    }
+
+    if width == 0 || height == 0 || idat_data.is_empty() || bit_depth != 8 {
+        return None;
+    }
+
+    // 解压 IDAT
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+    let mut decoder = ZlibDecoder::new(&idat_data[..]);
+    let mut raw = Vec::new();
+    decoder.read_to_end(&mut raw).ok()?;
+
+    let bytes_per_pixel = match color_type {
+        2 => 3, // RGB
+        6 => 4, // RGBA
+        0 => 1, // Grayscale
+        4 => 2, // Grayscale + Alpha
+        _ => return None,
+    };
+
+    let stride = width as usize * bytes_per_pixel;
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    let mut raw_pos = 0;
+
+    for _y in 0..height as usize {
+        if raw_pos >= raw.len() { break; }
+        raw_pos += 1; // skip filter byte (忽略 PNG 滤镜, 简化处理)
+        let row_start = raw_pos;
+        for _x in 0..width as usize {
+            let px = row_start + _x * bytes_per_pixel;
+            if px + bytes_per_pixel > raw.len() { break; }
+            match color_type {
+                2 => { // RGB → RGBA
+                    rgba.extend_from_slice(&[raw[px], raw[px+1], raw[px+2], 255]);
+                }
+                6 => { // RGBA
+                    rgba.extend_from_slice(&raw[px..px+4]);
+                }
+                0 => { // Gray → RGBA
+                    let g = raw[px];
+                    rgba.extend_from_slice(&[g, g, g, 255]);
+                }
+                4 => { // Gray+Alpha → RGBA
+                    let g = raw[px];
+                    rgba.extend_from_slice(&[g, g, g, raw[px+1]]);
+                }
+                _ => {}
+            }
+        }
+        raw_pos = row_start + stride;
+    }
+
+    Some((width, height, rgba))
 }
