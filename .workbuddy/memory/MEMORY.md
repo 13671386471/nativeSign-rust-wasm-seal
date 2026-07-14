@@ -6,6 +6,8 @@
 - PDFium WASM 模块来自 paulocoutinhox/pdfium-lib 版本 7902
 - 支持 PDF 和 OFD 文档格式
 - 架构: lib.rs → engine.rs (文档引擎) + render.rs (渲染引擎) + seal.rs (印章) + sign.rs (签名)
+- lopdf 0.34 重要行为: `need_separator()` 对 String/Array/Name/Dictionary 返回 false,
+  输出字典键值无空格 (如 `/Contents<000>` 而非 `/Contents <000>`)
 
 ## WASM 初始化流程 (index.html)
 1. 加载 PDFium WASM (pdfium.js) → PDFiumModule()

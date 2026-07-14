@@ -638,6 +638,10 @@ fn finalize_pdf_signatures(
 
 /// 在数据中查找指定签名字典对象的 /Contents <hex> 范围
 /// 返回 (hex_start, hex_end): hex_start 是第一个 hex 字符的位置, hex_end 是 > 的位置
+///
+/// 注意: lopdf 0.34 的 write_dictionary 对 String 类型不插入分隔空格,
+/// 输出 /Contents<000...000> 而非 /Contents <000...000>。
+/// 因此搜索必须兼容两种格式。
 fn find_contents_hex_range(data: &[u8], sig_obj_id: u32) -> Option<(usize, usize)> {
     let prefix = format!("{} 0 obj", sig_obj_id);
     let prefix_bytes = prefix.as_bytes();
@@ -646,17 +650,29 @@ fn find_contents_hex_range(data: &[u8], sig_obj_id: u32) -> Option<(usize, usize
     let obj_pos = data.windows(prefix_bytes.len())
         .position(|w| w == prefix_bytes)?;
 
-    // 在对象定义后找 /Contents <
+    // 在对象定义后找 /Contents 后跟 < (中间可能有空白)
+    // lopdf 0.34 输出 /Contents< (无空格) 或 /Contents < (有空格), 都需兼容
     let search_start = obj_pos + prefix_bytes.len();
-    let contents_marker = b"/Contents <";
+    let contents_key = b"/Contents";
     let contents_pos = data[search_start..]
-        .windows(contents_marker.len())
-        .position(|w| w == contents_marker)?;
+        .windows(contents_key.len())
+        .position(|w| w == contents_key)?;
 
-    let hex_start = search_start + contents_pos + contents_marker.len();
+    let after_key = search_start + contents_pos + contents_key.len();
+
+    // 跳过空白字符 (空格/换行/回车/Tab), 找到 <
+    let mut p = after_key;
+    while p < data.len() && (data[p] == b' ' || data[p] == b'\n' || data[p] == b'\r' || data[p] == b'\t') {
+        p += 1;
+    }
+    if p >= data.len() || data[p] != b'<' {
+        return None;
+    }
+
+    let hex_start = p + 1; // < 之后第一个 hex 字符
 
     // 找到 > (hex 字符串结束)
-    // 跳过所有 hex 字符 (0-9, a-f, A-F)
+    // 跳过所有 hex 字符 (0-9, a-f, A-F) 和可能的空白
     let mut hex_end = hex_start;
     while hex_end < data.len() {
         let b = data[hex_end];
