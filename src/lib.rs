@@ -102,6 +102,13 @@ fn refresh_render() {
         let doc_state = engine.doc.state.clone();
         web_sys::console::log_1(&format!("[refresh] doc_type={:?} page_count={} is_opened={}",
             doc_state.doc_type, doc_state.page_count, doc_state.is_opened).into());
+
+        // 防御检查：未打开文档或无数据时跳过渲染
+        if !doc_state.is_opened || doc_state.raw_data.is_empty() {
+            web_sys::console::warn_1(&"[refresh] 文档未打开或数据为空，跳过渲染".into());
+            return;
+        }
+
         if let Err(e) = engine.render.refresh(&doc_state) {
             web_sys::console::error_1(&format!("[refresh] 渲染失败: {:?}", e).into());
         }
@@ -166,8 +173,12 @@ pub async fn load_file(file_data: Vec<u8>, file_name: &str) -> Result<String, Js
             Vec::new()
         };
 
-        // 第二步：预处理嵌入中文字体
-        let processed = font_embed::preprocess_pdf_for_cjk(&file_data);
+        // 第二步：预处理嵌入中文字体（仅对 PDF 文件）
+        let processed = if file_name.to_lowercase().ends_with(".pdf") {
+            font_embed::preprocess_pdf_for_cjk(&file_data)
+        } else {
+            file_data.to_vec()
+        };
 
         // 第三步：加载文件
         engine.doc.load_file(processed, file_name)
@@ -188,7 +199,14 @@ pub async fn load_file(file_data: Vec<u8>, file_name: &str) -> Result<String, Js
 
         Ok("1".to_string())
     });
-    refresh_render();
+
+    // 只在加载成功后才触发渲染
+    match &result {
+        Ok(_) => refresh_render(),
+        Err(e) => {
+            web_sys::console::error_1(&format!("[load_file] 加载失败，跳过渲染: {:?}", e).into());
+        }
+    }
     result
 }
 

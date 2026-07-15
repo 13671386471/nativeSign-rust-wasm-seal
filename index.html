@@ -18,7 +18,8 @@
         .doc-container { background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); overflow: hidden; }
         .doc-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: #fafafa; border-bottom: 1px solid #f0f0f0; }
         .doc-title { font-size: 14px; font-weight: 500; color: #262626; }
-        .doc-body { position: relative; min-height: 600px; max-height: 800px; background: #ffffff; overflow: auto; }
+        .doc-body { position: relative; min-height: 600px; max-height: 800px; background: #ffffff; overflow: auto; cursor: grab; }
+        .doc-body.dragging { cursor: grabbing; user-select: none; }
         #spinner { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; color: #999; z-index: 10; }
         #spinner .loading-icon { font-size: 48px; margin-bottom: 12px; animation: spin 1s linear infinite; }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
@@ -1390,6 +1391,55 @@
             }
             return JSON.stringify({ end: 1, tips: 'Stop operate!' });
         };
+
+        // ============================================================
+        // 文档拖拽滚动：放大后可用鼠标拖拽上下左右移动
+        // ============================================================
+        (function initDragScroll() {
+            const container = document.querySelector('.doc-body');
+            if (!container) return;
+
+            let isDown = false;
+            let startX = 0, startY = 0;
+            let scrollLeft = 0, scrollTop = 0;
+
+            container.addEventListener('mousedown', (e) => {
+                // 不拦截按钮、输入框等可交互元素的点击；canvas 区域允许拖拽
+                if (e.target.closest('button, input, select, textarea, a')) return;
+                // 仅在内容可滚动时才进入拖拽模式
+                if (container.scrollWidth <= container.clientWidth && container.scrollHeight <= container.clientHeight) return;
+
+                isDown = true;
+                container.classList.add('dragging');
+                const rect = container.getBoundingClientRect();
+                startX = e.clientX - rect.left;
+                startY = e.clientY - rect.top;
+                scrollLeft = container.scrollLeft;
+                scrollTop = container.scrollTop;
+            });
+
+            container.addEventListener('mouseleave', () => {
+                isDown = false;
+                container.classList.remove('dragging');
+            });
+
+            container.addEventListener('mouseup', () => {
+                isDown = false;
+                container.classList.remove('dragging');
+            });
+
+            container.addEventListener('mousemove', (e) => {
+                if (!isDown) return;
+                e.preventDefault();
+                const rect = container.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                const walkX = (x - startX) * 1.2;
+                const walkY = (y - startY) * 1.2;
+                container.scrollLeft = scrollLeft - walkX;
+                container.scrollTop = scrollTop - walkY;
+            });
+        })();
     </script>
 </body>
 </html>

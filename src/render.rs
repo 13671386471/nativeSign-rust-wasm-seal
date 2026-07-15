@@ -208,6 +208,12 @@ impl RenderEngine {
         // 先清除旧页面
         self.clear_all_canvases();
 
+        // 二次防御：检查是否可以渲染
+        if !doc_state.is_opened || doc_state.raw_data.is_empty() || doc_state.page_count == 0 {
+            web_sys::console::warn_1(&"[refresh] 无法渲染：文档未打开或数据为空或无页面".into());
+            return Ok(());
+        }
+
         match doc_state.doc_type {
             DocType::Pdf => self.render_all_pdf_pages(doc_state)?,
             DocType::Ofd => self.render_all_ofd_pages(doc_state)?,
@@ -386,13 +392,15 @@ impl RenderEngine {
         }
 
         // 转换为 ImageData 并直接绘制到 canvas
-        // (pdfium-render 的 as_image_data 内部已做 BGRA→RGBA 转换与 stride 处理)
-        let image_data = bitmap
-            .as_image_data()
-            .map_err(|e| {
-                web_sys::console::log_1(&format!("[render_page] page[{}] as_image_data FAILED: {:?}", page_idx, e).into());
-                JsValue::from_str(&format!("ImageData 转换失败: {:?}", e))
-            })?;
+        let rgba = bitmap.as_rgba_bytes();
+        let image_data = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
+            wasm_bindgen::Clamped(&rgba),
+            bmp_w,
+            bmp_h,
+        ).map_err(|e| {
+            web_sys::console::log_1(&format!("[render_page] page[{}] ImageData 创建失败: {:?}", page_idx, e).into());
+            JsValue::from_str("ImageData 创建失败")
+        })?;
 
         // 将 canvas 尺寸调整为 bitmap 实际尺寸, 避免 put_image_data 因尺寸不匹配而裁剪/报错
         canvas.set_width(bmp_w);
@@ -434,7 +442,7 @@ impl RenderEngine {
 
     /// 计算页面的渲染目标尺寸
     fn calc_render_size(&self, page_w: f64, page_h: f64, container_w: f64, container_h: f64) -> (i32, i32) {
-        match self.config.page_mode {
+        let result = match self.config.page_mode {
             PageMode::FitWidth => {
                 let w = (container_w * self.config.zoom) as i32;
                 let h = ((page_h / page_w) * container_w * self.config.zoom) as i32;
@@ -449,7 +457,12 @@ impl RenderEngine {
             _ => {
                 ((page_w * self.config.zoom) as i32, (page_h * self.config.zoom) as i32)
             }
-        }
+        };
+        web_sys::console::log_1(&format!(
+            "[calc_render_size] mode={:?} zoom={:.3} page={:.1}x{:.1} container={:.1}x{:.1} => canvas={}x{}",
+            self.config.page_mode, self.config.zoom, page_w, page_h, container_w, container_h, result.0, result.1
+        ).into());
+        result
     }
 
     // ============================================================
@@ -461,15 +474,18 @@ impl RenderEngine {
             doc_state.doc_type, doc_state.raw_data.len()).into());
 
         // 解析 OFD 文档
-        let ofd = ofd_parser::parse_ofd(&doc_state.raw_data)
-            .map_err(|e| {
-                web_sys::console::log_1(&format!("[render] OFD 解析失败: {}", e).into());
-                JsValue::from_str(&format!("OFD 解析失败: {}", e))
-            })?;
+        let ofd = match ofd_parser::parse_ofd(&doc_state.raw_data) {
+            Ok(doc) => doc,
+            Err(e) => {
+                web_sys::console::error_1(&format!("[render] OFD 解析失败: {}", e).into());
+                return Err(JsValue::from_str(&format!("OFD 解析失败: {}", e)));
+            }
+        };
 
         let page_count = ofd.pages.len() as u32;
         web_sys::console::log_1(&format!("[render] OFD parsed: {} pages", page_count).into());
         if page_count == 0 {
+            web_sys::console::warn_1(&"[render] OFD 页数为 0".into());
             return Ok(());
         }
 
@@ -480,23 +496,43 @@ impl RenderEngine {
             .get_element_by_id(&self.container_id)
             .ok_or_else(|| JsValue::from_str("找不到容器"))?;
         let container_w = container.client_width() as f64;
+        web_sys::console::log_1(&format!("[render] container client_width={}", container_w).into());
 
-        // 缩放: mm → px (1mm = 72/25.4 ≈ 2.835px, 即 A4=210×297mm → 595×842px)
-        let base_scale = 595.0 / 210.0; // ~2.833 px/mm
+        // 防御：容器宽度为 0 时（隐藏或尺寸为 0），使用默认宽度
+        let container_w = container_w.max(800.0);
+
+        // 获取容器高度用于 FitPage 计算
+        let container_h = window.inner_height()
+            .ok()
+            .and_then(|h| h.as_f64())
+            .unwrap_or(800.0);
 
         for page in &ofd.pages {
             let pb = &page.physical_box;
 
-            // 计算页面像素尺寸
-            let page_w_px = (pb.w * base_scale * self.config.zoom) as i32;
-            let page_h_px = (pb.h * base_scale * self.config.zoom) as i32;
-            let pw = page_w_px.max(1);
-            let ph = page_h_px.max(1);
+            // 统计对象数量
+            let text_count = page.objects.iter().filter(|o| matches!(o, ofd_parser::OfdObject::Text(_))).count();
+            let path_count = page.objects.iter().filter(|o| matches!(o, ofd_parser::OfdObject::Path(_))).count();
+            let img_count = page.objects.iter().filter(|o| matches!(o, ofd_parser::OfdObject::Image(_))).count();
+            web_sys::console::log_1(&format!(
+                "[render] page[{}] text={} path={} img={} physical={:.1}x{:.1}",
+                page.index, text_count, path_count, img_count, pb.w, pb.h
+            ).into());
+
+            // 页面基础像素尺寸 (mm → px @ 72dpi)
+            let page_w_px_base = pb.w * 2.83464567;
+            let page_h_px_base = pb.h * 2.83464567;
+
+            // 根据 PageMode 计算目标渲染尺寸
+            let (pw, ph) = self.calc_render_size(page_w_px_base, page_h_px_base, container_w, container_h);
+
+            // 实际渲染 scale (px/mm)
+            let base_scale = pw as f64 / pb.w;
 
         let canvas = self.create_page_canvas(page.index, pw, ph, page_count)?;
-        web_sys::console::log_1(&format!("[render] rendering page[{}] canvas={}x{} scale={:.3}",
-            page.index, pw, ph, base_scale * self.config.zoom).into());
-        let _ctx = self.render_ofd_canvas(&canvas, page, pb, base_scale, doc_state)?;
+        web_sys::console::log_1(&format!("[render] rendering page[{}] canvas={}x{} base_scale={:.3} zoom={:.2}",
+            page.index, pw, ph, base_scale, self.config.zoom).into());
+        let _ctx = self.render_ofd_canvas(&canvas, page, pb, base_scale, doc_state, &ofd.public_images)?;
         }
 
         Ok(())
@@ -510,6 +546,7 @@ impl RenderEngine {
         physical_box: &ofd_parser::OfdRect,
         base_scale: f64,
         doc_state: &DocState,
+        public_images: &std::collections::HashMap<String, Vec<u8>>,
     ) -> Result<CanvasRenderingContext2d, JsValue> {
         let ctx = canvas
             .get_context("2d")
@@ -525,27 +562,40 @@ impl RenderEngine {
         ctx.set_fill_style_str("#FFFFFF");
         ctx.fill_rect(0.0, 0.0, w, h);
 
-        let scale = base_scale * self.config.zoom;
+        // base_scale 已由 calc_render_size 根据 zoom 计算好 (包含 zoom 因子),
+        // 这里直接使用, 避免 zoom 被二次乘入。
+        let scale = base_scale;
 
         // OFD 坐标系: 原点在左上角, X 向右, Y 向下
         // Canvas 2D 坐标系相同, 直接应用 scale
         ctx.save();
         ctx.scale(scale, scale)?;
 
+        let mut rendered = 0usize;
         for obj in &page.objects {
             match obj {
                 ofd_parser::OfdObject::Text(text_obj) => {
-                    self.render_ofd_text(&ctx, text_obj, scale)?;
+                    self.render_ofd_text(&ctx, text_obj, scale, rendered)?;
+                    rendered += 1;
                 }
                 ofd_parser::OfdObject::Path(path_obj) => {
-                    self.render_ofd_path(&ctx, path_obj)?;
+                    self.render_ofd_path(&ctx, path_obj, scale, rendered)?;
+                    rendered += 1;
                 }
                 ofd_parser::OfdObject::Image(img_obj) => {
-                    // 图片渲染暂缓 (需要 image crate 解码)
-                    let _ = img_obj;
+                    self.render_ofd_image(&ctx, img_obj, scale, public_images)?;
+                    rendered += 1;
                 }
             }
         }
+
+        // 渲染页面注释 (Annotation, 如印章/水印), 在普通对象之上
+        for annot in &page.annotations {
+            self.render_ofd_annotation(&ctx, annot, scale, public_images)?;
+        }
+
+        web_sys::console::log_1(&format!("[render] page[{}] rendered {} objects + {} annotations",
+            page.index, rendered, page.annotations.len()).into());
 
         ctx.restore();
 
@@ -565,18 +615,24 @@ impl RenderEngine {
         ctx: &CanvasRenderingContext2d,
         obj: &ofd_parser::OfdTextObject,
         scale: f64,
+        idx: usize,
     ) -> Result<(), JsValue> {
-        // 只记录前3个文本对象的调试信息
-        static mut LOG_COUNT: u32 = 0;
-        unsafe {
-            if LOG_COUNT < 3 {
-                web_sys::console::log_1(&format!("[render_text] font={} size={}mm→{}px items={} text[0]={:?}",
-                    obj.font_family, obj.font_size, obj.font_size * scale,
-                    obj.text_items.len(),
-                    obj.text_items.get(0).map(|t| t.text.clone()).unwrap_or_default()
-                ).into());
-                LOG_COUNT += 1;
-            }
+        // 打印每个文本对象的调试信息（前20个）
+        if idx < 20 {
+            let text_preview = obj.text_items.get(0).map(|t| t.text.clone()).unwrap_or_default();
+            let ctm = obj.ctm;
+            web_sys::console::log_1(&format!(
+                "[render_text #{}] font={} size={:.2}mm→{:.1}px items={} ctm=[{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}] text={:?}",
+                idx, obj.font_family, obj.font_size, obj.font_size * scale,
+                obj.text_items.len(),
+                ctm[0], ctm[1], ctm[2], ctm[3], ctm[4], ctm[5],
+                if text_preview.len() > 15 { &text_preview[..15] } else { &text_preview }
+            ).into());
+        }
+
+        if obj.text_items.is_empty() {
+            web_sys::console::warn_1(&format!("[render_text #{}] 无文本内容，跳过", idx).into());
+            return Ok(());
         }
 
         ctx.save();
@@ -586,23 +642,42 @@ impl RenderEngine {
         let ctm = obj.ctm;
         ctx.transform(ctm[0], ctm[1], ctm[2], ctm[3], ctm[4], ctm[5])?;
 
-        // 字体: OFD 字体大小单位为 mm
-        // Canvas set_font 的 font-size 单位是 CSS 像素, 不受 ctx.scale() 变换影响
-        // 因此需要手动乘以 scale 将 mm 转为屏幕像素: screen_px = font_size_mm * scale
-        let font_family = if obj.font_family.is_empty() { "sans-serif" } else { &obj.font_family };
-        let screen_font_size = obj.font_size * scale;
+        // 字体映射: OFD 字体名 → CSS 字体栈
+        let font_family = if obj.font_family.is_empty() {
+            "sans-serif".to_string()
+        } else {
+            ofd_parser::map_font_family(&obj.font_family)
+        };
+
+        // 字体大小: OFD 单位为 mm; render_page_ofd 已经调用 ctx.scale(scale, scale),
+        // Canvas 的字体大小会随当前变换矩阵一起缩放, 因此这里直接使用 mm 值作为 px 值,
+        // 实际渲染高度 = font_size * scale。
+        let screen_font_size = obj.font_size.max(1.0);
         ctx.set_font(&format!("{}px {}", screen_font_size, font_family));
 
         // 文字颜色
-        ctx.set_fill_style_str(&obj.fill_color.to_css());
+        // 优先使用 stroke 颜色（OFD 中 Stroke="true" 表示文字只有外轮廓）
+        if let Some(ref sc) = obj.stroke_color {
+            ctx.set_stroke_style_str(&sc.to_css());
+            ctx.set_line_width(0.3);
+            // 如果 fill_color 是黑色（默认）且 stroke_color 有值，则使用 stroke 渲染
+            ctx.set_fill_style_str(&sc.to_css());
+        } else {
+            ctx.set_fill_style_str(&obj.fill_color.to_css());
+        }
+        ctx.set_text_baseline("alphabetic");
+        ctx.set_text_align("start");
 
         // 绘制各文本段
         for item in &obj.text_items {
-            // OFD 默认使用 baseline 对齐
-            ctx.set_text_baseline("alphabetic");
-            ctx.set_text_align("start");
-            ctx.fill_text(&item.text, item.x, item.y)
-                .map_err(|_| JsValue::from_str("文本绘制失败"))?;
+            if item.text.is_empty() { continue; }
+            if idx < 5 {
+                web_sys::console::log_1(&format!(
+                    "[render_text #{}] draw text={:?} at ({:.2},{:.2})",
+                    idx, item.text, item.x, item.y
+                ).into());
+            }
+            ctx.fill_text(&item.text, item.x, item.y).ok();
         }
 
         ctx.restore();
@@ -614,26 +689,175 @@ impl RenderEngine {
         &self,
         ctx: &CanvasRenderingContext2d,
         obj: &ofd_parser::OfdPathObject,
+        scale: f64,
+        idx: usize,
     ) -> Result<(), JsValue> {
+        if idx < 10 {
+            web_sys::console::log_1(&format!(
+                "[render_path #{}] data_len={} fill={:?} stroke={:?} line_w={:.2}",
+                idx, obj.path_data.len(), obj.fill_color.is_some(), obj.stroke_color.is_some(), obj.line_width
+            ).into());
+        }
+
         ctx.save();
 
         let ctm = obj.ctm;
         ctx.transform(ctm[0], ctm[1], ctm[2], ctm[3], ctm[4], ctm[5])?;
 
-        // 解析并执行路径命令
-        exec_path_commands(ctx, &obj.path_data)?;
+        // 尝试识别轴对齐矩形, 用 fill_rect 精确绘制以避免 path 抗锯齿导致的粗边
+        if let Some(rect) = try_parse_axis_aligned_rect(&obj.path_data) {
+            if let Some(ref fill) = obj.fill_color {
+                ctx.set_fill_style_str(&fill.to_css());
+                ctx.fill_rect(rect.0, rect.1, rect.2, rect.3);
+            }
+            if let Some(ref stroke) = obj.stroke_color {
+                ctx.set_stroke_style_str(&stroke.to_css());
+                let lw = (obj.line_width * scale).max(0.05);
+                ctx.set_line_width(lw);
+                ctx.stroke_rect(rect.0, rect.1, rect.2, rect.3);
+            }
+        } else {
+            // 解析并执行路径命令
+            exec_path_commands(ctx, &obj.path_data)?;
 
-        // 填充
-        if let Some(ref fill) = obj.fill_color {
-            ctx.set_fill_style_str(&fill.to_css());
-            ctx.fill();
+            // 填充
+            if let Some(ref fill) = obj.fill_color {
+                ctx.set_fill_style_str(&fill.to_css());
+                ctx.fill();
+            }
+
+            // 描边
+            if let Some(ref stroke) = obj.stroke_color {
+                ctx.set_stroke_style_str(&stroke.to_css());
+                let lw = (obj.line_width * scale).max(0.05);
+                ctx.set_line_width(lw);
+                ctx.stroke();
+            }
         }
 
-        // 描边
-        if let Some(ref stroke) = obj.stroke_color {
-            ctx.set_stroke_style_str(&stroke.to_css());
-            ctx.set_line_width(obj.line_width.max(0.1));
-            ctx.stroke();
+        ctx.restore();
+        Ok(())
+    }
+
+    /// 渲染 OFD 注释 (Annotation): 把 Appearance 内的对象渲染到 Annotation 的 Boundary 上
+    fn render_ofd_annotation(
+        &self,
+        ctx: &CanvasRenderingContext2d,
+        annot: &ofd_parser::OfdAnnotation,
+        scale: f64,
+        public_images: &std::collections::HashMap<String, Vec<u8>>,
+    ) -> Result<(), JsValue> {
+        if annot.objects.is_empty() {
+            return Ok(());
+        }
+
+        ctx.save();
+        // Annotation 的 Boundary 定义了 Appearance 的坐标系原点
+        ctx.translate(annot.boundary.x, annot.boundary.y)?;
+
+        let mut idx = 0usize;
+        for obj in &annot.objects {
+            match obj {
+                ofd_parser::OfdObject::Text(text_obj) => {
+                    self.render_ofd_text(ctx, text_obj, scale, idx)?;
+                    idx += 1;
+                }
+                ofd_parser::OfdObject::Path(path_obj) => {
+                    self.render_ofd_path(ctx, path_obj, scale, idx)?;
+                    idx += 1;
+                }
+                ofd_parser::OfdObject::Image(img_obj) => {
+                    self.render_ofd_image(ctx, img_obj, scale, public_images)?;
+                }
+            }
+        }
+
+        ctx.restore();
+        Ok(())
+    }
+
+    /// 渲染 OFD 图片对象
+    fn render_ofd_image(
+        &self,
+        ctx: &CanvasRenderingContext2d,
+        obj: &ofd_parser::OfdImageObject,
+        scale: f64,
+        public_images: &std::collections::HashMap<String, Vec<u8>>,
+    ) -> Result<(), JsValue> {
+        // 获取图片数据: 优先使用内嵌数据, 否则通过 ResourceID 查找
+        let img_bytes = if !obj.image_data.is_empty() {
+            &obj.image_data[..]
+        } else if !obj.resource_id.is_empty() {
+            match public_images.get(&obj.resource_id) {
+                Some(data) => &data[..],
+                None => {
+                    web_sys::console::warn_1(&format!(
+                        "[render_image] 未找到图片资源: {}", obj.resource_id
+                    ).into());
+                    return Ok(());
+                }
+            }
+        } else {
+            return Ok(());
+        };
+
+        // 尝试解码 PNG
+        let (iw, ih, rgba) = match decode_png_to_rgba(img_bytes) {
+            Some(v) => v,
+            None => {
+                web_sys::console::warn_1(&"[render_image] 不支持的图片格式 (仅支持 PNG)".into());
+                return Ok(());
+            }
+        };
+
+        // 创建临时 canvas 用于绘制图片
+        let window = web_sys::window().ok_or(JsValue::from_str("无 window"))?;
+        let document = window.document().ok_or(JsValue::from_str("无 document"))?;
+        let tmp_canvas = document
+            .create_element("canvas")
+            .map_err(|_| JsValue::from_str("创建 canvas 失败"))?;
+        let tmp: HtmlCanvasElement = tmp_canvas
+            .dyn_into()
+            .map_err(|_| JsValue::from_str("canvas 转换失败"))?;
+        tmp.set_width(iw);
+        tmp.set_height(ih);
+
+        let tmp_ctx = tmp
+            .get_context("2d")
+            .map_err(|_| JsValue::from_str("无法获取 2d 上下文"))?
+            .unwrap()
+            .dyn_into::<CanvasRenderingContext2d>()
+            .map_err(|_| JsValue::from_str("无法转换为 CanvasRenderingContext2d"))?;
+
+        let img_data_obj = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
+            wasm_bindgen::Clamped(&rgba),
+            iw,
+            ih,
+        ).map_err(|_| JsValue::from_str("ImageData 创建失败"))?;
+        tmp_ctx.put_image_data(&img_data_obj, 0.0, 0.0).ok();
+
+        // 应用 CTM 变换并绘制
+        ctx.save();
+        let ctm = obj.ctm;
+
+        // 单位矩阵
+        let identity = [1.0f64, 0.0, 0.0, 1.0, 0.0, 0.0];
+        let has_ctm = ctm.iter().zip(identity.iter()).any(|(a, b)| (a - b).abs() > 1e-9);
+
+        if has_ctm {
+            // CTM 已包含从图像坐标系到对象坐标系的完整变换,
+            // 因此把图像绘制在 (0,0) 到 (1,1) 的单位矩形上即可
+            ctx.transform(ctm[0], ctm[1], ctm[2], ctm[3], ctm[4], ctm[5])?;
+            ctx.draw_image_with_html_canvas_element_and_dw_and_dh(&tmp, 0.0, 0.0, 1.0, 1.0).ok();
+        } else if let Some(boundary) = &obj.boundary {
+            // 无 CTM 时, 使用 Boundary 作为目标位置和大小
+            ctx.draw_image_with_html_canvas_element_and_dw_and_dh(
+                &tmp, boundary.x, boundary.y, boundary.w, boundary.h
+            ).ok();
+        } else {
+            ctx.draw_image_with_html_canvas_element_and_dw_and_dh(
+                &tmp, 0.0, 0.0, iw as f64 / scale, ih as f64 / scale
+            ).ok();
         }
 
         ctx.restore();
@@ -821,6 +1045,110 @@ impl Default for RenderEngine {
 // SVG 风格路径命令执行器 (用于 OFD AbbreviatedData)
 // ============================================================
 
+/// SVG 椭圆弧 → Canvas ellipse 绘制
+/// 参考 SVG 规范 https://www.w3.org/TR/SVG/implnote.html#ArcConversionCenterToEndpoint
+fn draw_svg_arc(
+    ctx: &CanvasRenderingContext2d,
+    x0: f64,
+    y0: f64,
+    mut rx: f64,
+    mut ry: f64,
+    phi_deg: f64,
+    large_arc: bool,
+    sweep: bool,
+    x: f64,
+    y: f64,
+) -> Result<(), JsValue> {
+    if x0 == x && y0 == y {
+        return Ok(());
+    }
+
+    let phi = phi_deg.to_radians();
+    let cos_phi = phi.cos();
+    let sin_phi = phi.sin();
+
+    // Step 1: 计算中点坐标 (在旋转后的坐标系中)
+    let dx2 = (x0 - x) / 2.0;
+    let dy2 = (y0 - y) / 2.0;
+    let x1p = cos_phi * dx2 + sin_phi * dy2;
+    let y1p = -sin_phi * dx2 + cos_phi * dy2;
+
+    // Step 2: 确保半径足够大
+    let mut lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+    if lambda > 1.0 {
+        lambda = lambda.sqrt();
+        rx *= lambda;
+        ry *= lambda;
+    }
+
+    // Step 3: 计算圆心
+    let sign = if large_arc == sweep { -1.0 } else { 1.0 };
+    let sq = ((rx * rx * ry * ry) - (rx * rx * y1p * y1p) - (ry * ry * x1p * x1p))
+        / ((rx * rx * y1p * y1p) + (ry * ry * x1p * x1p));
+    let sq = sq.max(0.0);
+    let coef = sign * sq.sqrt();
+    let cxp = coef * ((rx * y1p) / ry);
+    let cyp = coef * -((ry * x1p) / rx);
+
+    let cx = cos_phi * cxp - sin_phi * cyp + (x0 + x) / 2.0;
+    let cy = sin_phi * cxp + cos_phi * cyp + (y0 + y) / 2.0;
+
+    // Step 4: 计算起始和终止角度
+    let theta1 = {
+        let vx = (x1p - cxp) / rx;
+        let vy = (y1p - cyp) / ry;
+        let mut angle = vy.atan2(vx);
+        if angle.is_nan() { angle = 0.0; }
+        angle
+    };
+
+    let mut delta_theta = {
+        let vx1 = (-x1p - cxp) / rx;
+        let vy1 = (-y1p - cyp) / ry;
+        let mut angle = vy1.atan2(vx1) - theta1;
+        if angle.is_nan() { angle = 0.0; }
+        // 规范化到 [-2π, 2π]
+        while angle > std::f64::consts::PI * 2.0 {
+            angle -= std::f64::consts::PI * 2.0;
+        }
+        while angle < -std::f64::consts::PI * 2.0 {
+            angle += std::f64::consts::PI * 2.0;
+        }
+        // 根据 large_arc 和 sweep 调整角度方向
+        if !sweep && angle > 0.0 {
+            angle -= std::f64::consts::PI * 2.0;
+        } else if sweep && angle < 0.0 {
+            angle += std::f64::consts::PI * 2.0;
+        }
+        angle
+    };
+
+    // 如果 large_arc 为 true 但角度太小, 或者 large_arc 为 false 但角度太大, 调整
+    let abs_dt = delta_theta.abs();
+    if large_arc && abs_dt < std::f64::consts::PI {
+        if delta_theta >= 0.0 {
+            delta_theta = std::f64::consts::PI * 2.0 - abs_dt;
+        } else {
+            delta_theta = -(std::f64::consts::PI * 2.0 - abs_dt);
+        }
+    } else if !large_arc && abs_dt > std::f64::consts::PI {
+        if delta_theta >= 0.0 {
+            delta_theta = abs_dt - std::f64::consts::PI * 2.0;
+        } else {
+            delta_theta = -(abs_dt - std::f64::consts::PI * 2.0);
+        }
+    }
+
+    let theta2 = theta1 + delta_theta;
+
+    // 使用 Canvas ellipse 绘制
+    // ellipse(x, y, radiusX, radiusY, rotation, startAngle, endAngle)
+    // 注: web-sys 的 ellipse 不暴露 counterClockwise 参数, 通过角度方向控制
+    ctx.ellipse(cx, cy, rx, ry, phi, theta1, theta2).ok();
+
+    Ok(())
+}
+
 /// 解析并执行 OFD 缩略路径数据 (兼容 SVG path 子集)
 /// 支持: M/m, L/l, C/c, Q/q, A/a, Z/z, H/h, V/v
 fn exec_path_commands(
@@ -857,7 +1185,13 @@ fn exec_path_commands(
                     i += 2;
                 }
             }
-            "C" => {
+            "C" | "c" => {
+                // OFD 中 C = close path (不同于 SVG 的 cubic bezier)
+                ctx.close_path();
+                cx = sx; cy = sy;
+            }
+            "B" => {
+                // OFD 中 B = cubic bezier: B x1 y1 x2 y2 x y
                 while i + 5 < tokens.len() && is_num(&tokens[i]) {
                     let x1: f64 = tokens[i].parse().unwrap_or(0.0);
                     let y1: f64 = tokens[i + 1].parse().unwrap_or(0.0);
@@ -882,26 +1216,34 @@ fn exec_path_commands(
                 }
             }
             "A" => {
-                // arc: rx ry x-axis-rotation large-arc-flag sweep-flag x y
-                while i + 6 < tokens.len() && is_num(&tokens[i]) {
+                // Arc: rx ry x-axis-rotation large-arc-flag sweep-flag x y
+                if i + 6 <= tokens.len() {
                     let rx: f64 = tokens[i].parse().unwrap_or(0.0);
                     let ry: f64 = tokens[i + 1].parse().unwrap_or(0.0);
-                    let _rot: f64 = tokens[i + 2].parse().unwrap_or(0.0);
-                    let _large: f64 = tokens[i + 3].parse().unwrap_or(0.0);
-                    let sweep: f64 = tokens[i + 4].parse().unwrap_or(0.0);
+                    let rot_deg: f64 = tokens[i + 2].parse().unwrap_or(0.0);
+                    let large_arc: bool = tokens[i + 3].parse::<f64>().unwrap_or(0.0) != 0.0;
+                    let sweep: bool = tokens[i + 4].parse::<f64>().unwrap_or(0.0) != 0.0;
                     let x: f64 = tokens[i + 5].parse().unwrap_or(cx);
                     let y: f64 = tokens[i + 6].parse().unwrap_or(cy);
-                    // Canvas 2D 没有原生 arcTo 椭圆支持, 用简化的 ellipse
-                    // 这里做近似: ignore rotation, 取平均半径
-                    let r = (rx + ry) / 2.0;
-                    if r > 0.0 {
-                        ctx.arc(x, y, r, 0.0, std::f64::consts::PI * 2.0)
-                            .ok();
-                    } else {
-                        ctx.line_to(x, y);
+
+                    // 使用 ellipse 绘制椭圆弧
+                    if rx > 0.0 && ry > 0.0 {
+                        draw_svg_arc(ctx, cx, cy, rx, ry, rot_deg, large_arc, sweep, x, y)?;
                     }
                     cx = x; cy = y;
                     i += 7;
+                }
+            }
+            "T" => {
+                // Smooth quadratic bezier: T x y (control point = reflection of previous Q control)
+                while i + 1 < tokens.len() && is_num(&tokens[i]) {
+                    let x: f64 = tokens[i].parse().unwrap_or(cx);
+                    let y: f64 = tokens[i + 1].parse().unwrap_or(cy);
+                    // 使用上一个 Q 的控制点关于当前点的对称点作为控制点
+                    // 简化处理：用直线连接
+                    ctx.line_to(x, y);
+                    cx = x; cy = y;
+                    i += 2;
                 }
             }
             "Z" | "z" => {
@@ -1026,6 +1368,89 @@ fn tokenize_path(data: &str) -> Vec<String> {
 /// 判断 token 是否为数字
 fn is_num(s: &str) -> bool {
     s.parse::<f64>().is_ok()
+}
+
+/// 尝试识别 OFD 缩略路径是否为轴对齐矩形 (M/L/C/Z 命令组成的矩形)
+/// 返回 Some((x, y, w, h)) 如果识别成功
+fn try_parse_axis_aligned_rect(data: &str) -> Option<(f64, f64, f64, f64)> {
+    let tokens = tokenize_path(data);
+    if tokens.is_empty() {
+        return None;
+    }
+
+    // 期望格式之一:
+    // M x1 y1 L x2 y1 L x2 y2 L x1 y2 C
+    // M x1 y1 L x2 y1 L x2 y2 L x1 y2 Z
+    // M x1 y1 L x2 y1 L x2 y2 C
+    // M x1 y1 L x2 y2 L x1 y2 C (三角形? 不识别)
+    let mut coords: Vec<(f64, f64)> = Vec::new();
+    let mut i = 0;
+    let mut last_cmd = String::new();
+
+    while i < tokens.len() {
+        let t = &tokens[i];
+        if t.len() == 1 && t.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+            last_cmd = t.clone();
+            i += 1;
+        } else if is_num(t) {
+            match last_cmd.as_str() {
+                "M" | "L" => {
+                    if i + 1 < tokens.len() && is_num(&tokens[i + 1]) {
+                        let x: f64 = t.parse().ok()?;
+                        let y: f64 = tokens[i + 1].parse().ok()?;
+                        coords.push((x, y));
+                        i += 2;
+                    } else {
+                        return None;
+                    }
+                }
+                _ => i += 1,
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    // 过滤出矩形: 至少 4 个不同的角点, 且所有点都在矩形的 4 条边上
+    if coords.len() < 4 {
+        return None;
+    }
+
+    let xs: Vec<f64> = coords.iter().map(|p| p.0).collect();
+    let ys: Vec<f64> = coords.iter().map(|p| p.1).collect();
+    let min_x = xs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max_x = xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let min_y = ys.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max_y = ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
+    if max_x - min_x <= 0.0 || max_y - min_y <= 0.0 {
+        return None;
+    }
+
+    // 检查所有点是否都在矩形边界上 (允许极小误差)
+    let eps = 1e-4;
+    for (x, y) in &coords {
+        let on_left_or_right = (x - min_x).abs() < eps || (x - max_x).abs() < eps;
+        let on_top_or_bottom = (y - min_y).abs() < eps || (y - max_y).abs() < eps;
+        if !(on_left_or_right && on_top_or_bottom) {
+            return None;
+        }
+    }
+
+    // 检查是否至少有 4 个不同的角点 (或近似角点)
+    let mut corners = 0;
+    for (x, y) in &coords {
+        if ((x - min_x).abs() < eps || (x - max_x).abs() < eps)
+            && ((y - min_y).abs() < eps || (y - max_y).abs() < eps)
+        {
+            corners += 1;
+        }
+    }
+    if corners < 2 {
+        return None;
+    }
+
+    Some((min_x, min_y, max_x - min_x, max_y - min_y))
 }
 
 /// 解码 PNG 为 RGBA 像素数据 (用于印章渲染)

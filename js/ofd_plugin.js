@@ -66,22 +66,39 @@ function createOFDPlugin(wasmModule) {
   // 文档操作
   // ============================================================
 
-  async function LoadFile(file) {
-    // 支持 File 对象或 ArrayBuffer
+  /**
+   * 加载文件
+   * 支持多种调用方式:
+   *   1. LoadFile(file)            — 传入浏览器 File 对象
+   *   2. LoadFile(data, fileName)  — 传入已读取的 Uint8Array + 文件名
+   */
+  async function LoadFile(fileOrData, fileName) {
     let data;
-    if (file instanceof ArrayBuffer) {
-      data = new Uint8Array(file);
-    } else if (file instanceof Uint8Array) {
-      data = file;
-    } else if (file.arrayBuffer) {
-      const buf = await file.arrayBuffer();
+    let name;
+
+    if (fileName !== undefined && typeof fileName === 'string' && fileName.length > 0) {
+      // 调用方式 2: LoadFile(data, fileName)
+      data = fileOrData instanceof Uint8Array ? fileOrData : new Uint8Array(fileOrData);
+      name = fileName;
+    } else if (fileOrData instanceof ArrayBuffer) {
+      // 调用方式 1: LoadFile(arrayBuffer)
+      data = new Uint8Array(fileOrData);
+      name = 'document.pdf';
+    } else if (fileOrData instanceof Uint8Array) {
+      // 调用方式 1: LoadFile(uint8Array)
+      data = fileOrData;
+      name = 'document.pdf';
+    } else if (fileOrData && fileOrData.arrayBuffer) {
+      // 调用方式 1: LoadFile(File对象)
+      name = fileOrData.name || 'document.pdf';
+      const buf = await fileOrData.arrayBuffer();
       data = new Uint8Array(buf);
     } else {
       throw new Error('LoadFile: 不支持的文件类型');
     }
-    // FIXME: 通过 HTTP 加载文件时需要先获取文件数据
-    // 这里假设 file 参数已经是可用的文件数据
-    return mod.load_file(data, file.name || 'document.pdf');
+
+    console.log('[LoadFile] fileName=' + name + ' dataLen=' + data.length);
+    return mod.load_file(data, name);
   }
 
   async function IsOpened() {

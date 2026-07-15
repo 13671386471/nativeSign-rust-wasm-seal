@@ -33,6 +33,11 @@ impl DocumentEngine {
             return Err(format!("不支持的文件格式: {}", file_name));
         };
 
+        web_sys::console::log_1(&format!(
+            "[load_file] file_name={} detected_type={:?} data_len={}",
+            file_name, doc_type, file_data.len()
+        ).into());
+
         // 解析文档获取元信息
         let page_count = match doc_type {
             DocType::Pdf => self.parse_pdf_info(&file_data)?,
@@ -118,17 +123,90 @@ impl DocumentEngine {
         self.state.page_count
     }
 
-    /// 获取指定页的宽度（单位: 点 pt）
-    pub fn get_page_width(&self, _page_index: u32) -> f64 {
-        // PDF 默认 A4 宽度 = 595pt
-        // OFD 默认 A4 宽度 ≈ 210mm → 约 595pt
-        595.0
+    /// 获取指定页的宽度（单位: 点 pt / px）
+    pub fn get_page_width(&self, page_index: u32) -> f64 {
+        match self.state.doc_type {
+            DocType::Pdf => {
+                if let Ok(pdf) = lopdf::Document::load_mem(&self.state.raw_data) {
+                    let pages = pdf.get_pages();
+                    if let Some(&page_id) = pages.get(&(page_index + 1)) {
+                        if let Ok(page_obj) = pdf.get_object(page_id) {
+                            if let Ok(dict) = page_obj.as_dict() {
+                                if let Ok(arr) = dict.get(b"MediaBox").and_then(|o| o.as_array()) {
+                                    if arr.len() >= 4 {
+                                        let x1 = match &arr[0] {
+                                            lopdf::Object::Integer(i) => *i as f64,
+                                            lopdf::Object::Real(f) => *f as f64,
+                                            _ => 0.0,
+                                        };
+                                        let x2 = match &arr[2] {
+                                            lopdf::Object::Integer(i) => *i as f64,
+                                            lopdf::Object::Real(f) => *f as f64,
+                                            _ => 0.0,
+                                        };
+                                        if x2 > x1 {
+                                            return x2 - x1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                595.0
+            }
+            DocType::Ofd => {
+                if let Ok(ofd) = crate::ofd_parser::parse_ofd(&self.state.raw_data) {
+                    if let Some(page) = ofd.pages.get(page_index as usize) {
+                        return page.physical_box.w * 2.83464567; // mm → px @ 72dpi
+                    }
+                }
+                595.0
+            }
+        }
     }
 
-    /// 获取指定页的高度（单位: 点 pt）
-    pub fn get_page_height(&self, _page_index: u32) -> f64 {
-        // A4 高度 = 842pt
-        842.0
+    /// 获取指定页的高度（单位: 点 pt / px）
+    pub fn get_page_height(&self, page_index: u32) -> f64 {
+        match self.state.doc_type {
+            DocType::Pdf => {
+                if let Ok(pdf) = lopdf::Document::load_mem(&self.state.raw_data) {
+                    let pages = pdf.get_pages();
+                    if let Some(&page_id) = pages.get(&(page_index + 1)) {
+                        if let Ok(page_obj) = pdf.get_object(page_id) {
+                            if let Ok(dict) = page_obj.as_dict() {
+                                if let Ok(arr) = dict.get(b"MediaBox").and_then(|o| o.as_array()) {
+                                    if arr.len() >= 4 {
+                                        let y1 = match &arr[1] {
+                                            lopdf::Object::Integer(i) => *i as f64,
+                                            lopdf::Object::Real(f) => *f as f64,
+                                            _ => 0.0,
+                                        };
+                                        let y2 = match &arr[3] {
+                                            lopdf::Object::Integer(i) => *i as f64,
+                                            lopdf::Object::Real(f) => *f as f64,
+                                            _ => 0.0,
+                                        };
+                                        if y2 > y1 {
+                                            return y2 - y1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                842.0
+            }
+            DocType::Ofd => {
+                if let Ok(ofd) = crate::ofd_parser::parse_ofd(&self.state.raw_data) {
+                    if let Some(page) = ofd.pages.get(page_index as usize) {
+                        return page.physical_box.h * 2.83464567; // mm → px @ 72dpi
+                    }
+                }
+                842.0
+            }
+        }
     }
 
     /// 获取文档类型字符串
