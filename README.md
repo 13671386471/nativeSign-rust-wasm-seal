@@ -1,3 +1,6 @@
+
+在根目录下执行 http-server -p 8080 即可访问
+
 如果你想继续推进，可以按这个顺序：
 
 修复 parse_pdf_info() — 用 PDFium 解析后的 document.pages().len() 获取真实页数（5分钟）
