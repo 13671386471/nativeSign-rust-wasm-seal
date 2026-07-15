@@ -12,7 +12,7 @@
 //!   * 简单字体 (WinAnsi): 1 字节 cp1252 → Unicode
 //! 最后 Unicode → NotoSansSC CID (来自预生成的 uni2cid.bin)。
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, StringFormat};
@@ -100,6 +100,74 @@ fn font_has_fontfile(dict: &Dictionary) -> bool {
     false
 }
 
+/// 判断字体的 DescendantFont 是否为 CIDFontType2 (TrueType outlines)
+/// Identity-H + CIDFontType2 时, 内容流中的字符码通常是 GID
+fn is_cidfont_type2(doc: &Document, dict: &Dictionary) -> bool {
+    get_cidfont_type2_descendant(doc, dict).is_some()
+}
+
+/// 返回 CIDFontType2 后代字体的对象 ID (若有)
+fn get_cidfont_type2_descendant(doc: &Document, dict: &Dictionary) -> Option<ObjectId> {
+    if let Ok(df) = dict.get(b"DescendantFonts".as_ref()) {
+        if let Object::Array(arr) = df {
+            for d in arr.iter() {
+                if let Object::Reference(rid) = d {
+                    if let Ok(cdf) = doc.get_dictionary(*rid) {
+                        if let Ok(Object::Name(n)) = cdf.get(b"Subtype".as_ref()) {
+                            let s = String::from_utf8_lossy(n);
+                            if s.eq_ignore_ascii_case("CIDFontType2") {
+                                return Some(*rid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 读取 CIDFontType2 的 CIDToGIDMap, 返回 cid -> gid 映射。
+/// 若字典显式 /CIDToGIDMap /Identity 或缺失, 返回空 (表示 cid=gid)。
+fn read_cid_to_gid_map(doc: &Document, desc_id: ObjectId) -> Option<HashMap<u32, u32>> {
+    let cdf = doc.get_dictionary(desc_id).ok()?;
+    let cm = cdf.get(b"CIDToGIDMap".as_ref()).ok()?;
+    match cm {
+        Object::Name(n) if n.as_slice() == b"Identity" => return Some(HashMap::new()),
+        Object::Reference(rid) => {
+            let obj = doc.get_object(*rid).ok()?;
+            let stream = obj.as_stream().ok()?;
+            let data = stream.decompressed_content().unwrap_or_else(|_| stream.content.clone());
+            let mut map = HashMap::new();
+            for (cid, chunk) in data.chunks_exact(2).enumerate() {
+                let gid = u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+                map.insert(cid as u32, gid);
+            }
+            return Some(map);
+        }
+        _ => {}
+    }
+    None
+}
+
+/// 根据 (可选) CIDToGIDMap 与 GID->Unicode 映射构建 CID->Unicode 映射。
+/// 若 cid_to_gid 为空, 则假设 cid=gid, 直接返回 gid_to_unicode 的克隆。
+fn build_cid_to_unicode_from_gid(
+    cid_to_gid: &HashMap<u32, u32>,
+    gid_to_unicode: &HashMap<u32, u32>,
+) -> HashMap<u32, u32> {
+    if cid_to_gid.is_empty() {
+        return gid_to_unicode.clone();
+    }
+    let mut map = HashMap::with_capacity(cid_to_gid.len());
+    for (cid, gid) in cid_to_gid {
+        if let Some(&u) = gid_to_unicode.get(gid) {
+            map.insert(*cid, u);
+        }
+    }
+    map
+}
+
 /// 取字体字典内嵌字体字节 (优先 TrueType 的 FontFile2, 其次 CFF 的 FontFile3)
 fn get_embedded_font_bytes(doc: &Document, dict: &Dictionary) -> Option<Vec<u8>> {
     for key in [b"FontFile2".as_ref(), b"FontFile3".as_ref(), b"FontFile".as_ref()] {
@@ -109,7 +177,8 @@ fn get_embedded_font_bytes(doc: &Document, dict: &Dictionary) -> Option<Vec<u8>>
                 _ => ff,
             };
             if let Ok(s) = stream_ref.as_stream() {
-                return Some(s.content.clone());
+                // 字体流通常会被 FlateDecode 压缩, 先尝试解压
+                return s.decompressed_content().ok().or_else(|| Some(s.content.clone()));
             }
         }
     }
@@ -123,6 +192,18 @@ fn get_embedded_font_bytes(doc: &Document, dict: &Dictionary) -> Option<Vec<u8>>
                         }
                     }
                 }
+            }
+        }
+    }
+    // 新增：FontFile2/3 也可能在 FontDescriptor 字典中
+    if let Ok(fd) = dict.get(b"FontDescriptor".as_ref()) {
+        let fd_ref: &Object = match fd {
+            Object::Reference(rid) => doc.get_object(*rid).ok()?,
+            _ => fd,
+        };
+        if let Ok(fd_dict) = fd_ref.as_dict() {
+            if let Some(b) = get_embedded_font_bytes(doc, fd_dict) {
+                return Some(b);
             }
         }
     }
@@ -188,10 +269,12 @@ fn detect_encoding(font_dict: &Dictionary) -> Option<CodeEncoding> {
 
 // ============================================================
 // TrueType cmap 解析 — GID -> Unicode
-// ============================================================
+  // ============================================================
 
-fn parse_truetype_gid_to_unicode(ttf: &[u8]) -> HashMap<u32, u32> {
+  fn parse_truetype_gid_to_unicode(ttf: &[u8]) -> HashMap<u32, u32> {
     let mut map = HashMap::new();
+    let head = if ttf.len() >= 4 { format!("{:02x} {:02x} {:02x} {:02x}", ttf[0], ttf[1], ttf[2], ttf[3]) } else { "too short".to_string() };
+    web_sys::console::log_1(&format!("[parse_truetype_gid_to_unicode] input len={} head={}", ttf.len(), head).into());
     if ttf.len() < 12 {
         return map;
     }
@@ -208,8 +291,14 @@ fn parse_truetype_gid_to_unicode(ttf: &[u8]) -> HashMap<u32, u32> {
         }
     }
     let cmap_off = match cmap_off {
-        Some(o) => o,
-        None => return map,
+        Some(o) => {
+            web_sys::console::log_1(&format!("[parse_truetype_gid_to_unicode] found cmap table at offset={}", o).into());
+            o
+        }
+        None => {
+            web_sys::console::log_1(&format!("[parse_truetype_gid_to_unicode] no cmap table found").into());
+            return map;
+        }
     };
     if cmap_off + 4 > ttf.len() {
         return map;
@@ -240,11 +329,13 @@ fn parse_truetype_gid_to_unicode(ttf: &[u8]) -> HashMap<u32, u32> {
         return map;
     }
     let fmt = u16::from_be_bytes([ttf[sub], ttf[sub + 1]]);
+    web_sys::console::log_1(&format!("[parse_truetype_gid_to_unicode] selected cmap subtable format={}", fmt).into());
     match fmt {
         4 => parse_cmap4(ttf, sub, &mut map),
         12 => parse_cmap12(ttf, sub, &mut map),
         _ => {}
     }
+    web_sys::console::log_1(&format!("[parse_truetype_gid_to_unicode] result mappings={}", map.len()).into());
     map
 }
 
@@ -312,22 +403,32 @@ fn parse_cmap4(ttf: &[u8], base: usize, map: &mut HashMap<u32, u32>) {
 }
 
 fn parse_cmap12(ttf: &[u8], base: usize, map: &mut HashMap<u32, u32>) {
-    if base + 12 > ttf.len() {
+    // format=12 子表结构: format(2) + reserved(2) + length(4) + language(4) + nGroups(4) + groups[]
+    if base + 16 > ttf.len() {
         return;
     }
-    let ngroups = u32::from_be_bytes([ttf[base + 4], ttf[base + 5], ttf[base + 6], ttf[base + 7]]) as usize;
-    let mut p = base + 12;
-    for _ in 0..ngroups {
+    let ngroups = u32::from_be_bytes([ttf[base + 12], ttf[base + 13], ttf[base + 14], ttf[base + 15]]) as usize;
+    let mut p = base + 16;
+    let mut total_inserted = 0usize;
+    const MAX_RANGE: u32 = 100_000;
+    for i in 0..ngroups {
         if p + 12 > ttf.len() {
+            web_sys::console::warn_1(&format!("[parse_cmap12] group {} exceeds table length, stop", i).into());
             break;
         }
         let startc = u32::from_be_bytes([ttf[p], ttf[p + 1], ttf[p + 2], ttf[p + 3]]);
         let endc = u32::from_be_bytes([ttf[p + 4], ttf[p + 5], ttf[p + 6], ttf[p + 7]]);
         let startg = u32::from_be_bytes([ttf[p + 8], ttf[p + 9], ttf[p + 10], ttf[p + 11]]);
+        if endc < startc || (endc - startc) > MAX_RANGE {
+            web_sys::console::warn_1(&format!("[parse_cmap12] group {} invalid range: start={} end={}", i, startc, endc).into());
+            p += 12;
+            continue;
+        }
         let mut c = startc;
         let mut g = startg;
         loop {
             map.insert(g, c);
+            total_inserted += 1;
             if c == endc {
                 break;
             }
@@ -336,6 +437,7 @@ fn parse_cmap12(ttf: &[u8], base: usize, map: &mut HashMap<u32, u32>) {
         }
         p += 12;
     }
+    web_sys::console::log_1(&format!("[parse_cmap12] groups={} inserted={}", ngroups, total_inserted).into());
 }
 
 // ============================================================
@@ -566,6 +668,42 @@ fn build_to_unicode_cmap(uni2cid: &HashMap<u32, u32>) -> Vec<u8> {
     out.into_bytes()
 }
 
+/// 从 OpenType/CFF 字体文件中提取裸 CFF 表数据。
+/// CIDFontType0 的 FontFile3 需要裸 CFF 数据(而非完整 OTF 包装),否则 PDFium 无法解析。
+fn extract_cff_from_opentype(font_data: &[u8]) -> Option<Vec<u8>> {
+    if font_data.len() < 12 {
+        return None;
+    }
+    let num_tables = u16::from_be_bytes([font_data[4], font_data[5]]) as usize;
+    let mut off = 12;
+    for _ in 0..num_tables {
+        if off + 16 > font_data.len() {
+            return None;
+        }
+        let tag = &font_data[off..off + 4];
+        let t_off = u32::from_be_bytes([
+            font_data[off + 8],
+            font_data[off + 9],
+            font_data[off + 10],
+            font_data[off + 11],
+        ]) as usize;
+        let t_len = u32::from_be_bytes([
+            font_data[off + 12],
+            font_data[off + 13],
+            font_data[off + 14],
+            font_data[off + 15],
+        ]) as usize;
+        if tag == b"CFF " {
+            if t_off + t_len > font_data.len() {
+                return None;
+            }
+            return Some(font_data[t_off..t_off + t_len].to_vec());
+        }
+        off += 16;
+    }
+    None
+}
+
 /// 构建内嵌字体对象 (Type0 / Identity-H + CIDFontType0 / CIDFontType0C + ToUnicode)
 /// 字体数据只嵌入一次, 返回的 Type0 对象 ID 可被多个页面/字体引用。
 fn build_embedded_font(
@@ -573,10 +711,22 @@ fn build_embedded_font(
     font_data: &[u8],
     uni2cid: &HashMap<u32, u32>,
 ) -> ObjectId {
+    // CIDFontType0 的 FontFile3 必须是裸 CFF 数据。如果传入的是 OTF 包装,
+    // 先提取 CFF 表;提取失败则回退到原始数据(保持对旧调用的兼容性)。
+    let cff_data = extract_cff_from_opentype(font_data).unwrap_or_else(|| font_data.to_vec());
+    web_sys::console::log_1(
+        &format!(
+            "[font_embed] build_embedded_font: input={} bytes, cff={} bytes",
+            font_data.len(),
+            cff_data.len()
+        )
+        .into(),
+    );
+
     // FontFile3 流 (CFF)
     let mut ff_dict = Dictionary::new();
-    ff_dict.set(b"Length1".to_vec(), Object::Integer(font_data.len() as i64));
-    let fontfile_id = doc.add_object(Object::Stream(Stream::new(ff_dict, font_data.to_vec())));
+    ff_dict.set(b"Length1".to_vec(), Object::Integer(cff_data.len() as i64));
+    let fontfile_id = doc.add_object(Object::Stream(Stream::new(ff_dict, cff_data)));
     if let Ok(Object::Stream(s)) = doc.get_object_mut(fontfile_id) {
         s.dict
             .set(b"Subtype".to_vec(), Object::Name(b"CIDFontType0C".to_vec()));
@@ -794,6 +944,9 @@ fn rewrite_operations(
 ) -> Vec<Operation> {
     let mut out = Vec::with_capacity(ops.len());
     let mut current_font: Option<String> = None;
+    use std::sync::{LazyLock, Mutex};
+    static SAMPLED: LazyLock<Mutex<HashSet<String>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
 
     for op in ops {
         if op.operator == "Tf" {
@@ -811,6 +964,15 @@ fn rewrite_operations(
                 if let Some((enc, c2u)) = info {
                     if let Some(Object::String(s, _)) = op.operands.get(0) {
                         let new_s = remap_string(s, enc, &c2u, uni2cid);
+                        if let Ok(mut sampled) = SAMPLED.lock() {
+                            if let Some(ref fname) = current_font {
+                                if !s.is_empty() && sampled.insert(fname.clone()) {
+                                    let raw_hex = s.iter().take(8).map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join("");
+                                    let mapped_hex = new_s.iter().take(8).map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join("");
+                                    web_sys::console::log_1(&format!("[font_embed][sample] font={} raw=<{}> mapped=<{}> enc={:?}", fname, raw_hex, mapped_hex, enc).into());
+                                }
+                            }
+                        }
                         let mut new_args = op.operands.clone();
                         new_args[0] = Object::String(new_s, StringFormat::Hexadecimal);
                         out.push(Operation::new(&op.operator, new_args));
@@ -920,19 +1082,67 @@ pub fn embed_cjk_fonts(pdf_bytes: &[u8], font_bytes: &[u8]) -> Result<Vec<u8>, S
             // 推导 code -> unicode
             let mut code_to_unicode: HashMap<u32, u32> = HashMap::new();
             if let CodeEncoding::IdentityCid = enc {
-                // 优先: 内嵌 TrueType 的 cmap (GID=Unicode)
-                if let Some(emb) = get_embedded_font_bytes(&doc, &fdict) {
-                    let g2u = parse_truetype_gid_to_unicode(&emb);
-                    if !g2u.is_empty() {
-                        code_to_unicode = g2u;
-                    }
-                }
-                // 退而求其次: 源 ToUnicode
-                if code_to_unicode.is_empty() {
+                // Identity-H 时, 字符码的含义取决于 DescendantFont 类型:
+                // - CIDFontType2 (TrueType outlines): 字符码通常是 GID, 优先用内嵌 TrueType 的 cmap (GID->Unicode)
+                // - CIDFontType0 (CFF outlines): 字符码通常是 CID, 优先用 ToUnicode CMap (CID->Unicode)
+                let desc_id = get_cidfont_type2_descendant(&doc, &fdict);
+                let is_t2 = desc_id.is_some();
+                web_sys::console::log_1(&format!("[font_embed] font={} Identity-H descendant_is_CIDFontType2={}", name, is_t2).into());
+
+                if is_t2 {
+                    let cid_to_gid = desc_id
+                        .and_then(|id| read_cid_to_gid_map(&doc, id))
+                        .unwrap_or_default();
+                    let has_cidgid = !cid_to_gid.is_empty();
+                    web_sys::console::log_1(&format!("[font_embed] font={} CIDToGIDMap entries={}", name, cid_to_gid.len()).into());
+
+                    // 关键修正: 对 CIDFontType2 优先使用 PDF 自带的 ToUnicode CMap。
+                    // 很多 PDF 生成器会对内嵌 TrueType 做字形混淆/子集化, 把 cmap 映射到
+                    // PUA 码点, 导致 TrueType cmap 反查到的 Unicode 是错的; ToUnicode 才是
+                    // 从 CID 到正确 Unicode 的权威映射。
                     if let Some(tu) = get_font_tounicode(&doc, &fdict) {
                         code_to_unicode = parse_tounicode_cid_to_unicode(&tu);
+                        web_sys::console::log_1(&format!("[font_embed] font={} ToUnicode mappings={}", name, code_to_unicode.len()).into());
+                    }
+                    if code_to_unicode.is_empty() {
+                        match get_embedded_font_bytes(&doc, &fdict) {
+                            Some(emb) => {
+                                web_sys::console::log_1(&format!("[font_embed] font={} embedded font bytes={}", name, emb.len()).into());
+                                let g2u = parse_truetype_gid_to_unicode(&emb);
+                                web_sys::console::log_1(&format!("[font_embed] font={} fallback TrueType cmap mappings={}", name, g2u.len()).into());
+                                if !g2u.is_empty() {
+                                    code_to_unicode = build_cid_to_unicode_from_gid(&cid_to_gid, &g2u);
+                                    web_sys::console::log_1(&format!("[font_embed] font={} final cid->unicode mappings={} (used CIDToGIDMap={})", name, code_to_unicode.len(), has_cidgid).into());
+                                }
+                            }
+                            None => {
+                                web_sys::console::log_1(&format!("[font_embed] font={} no embedded font bytes found", name).into());
+                            }
+                        }
+                    }
+                } else {
+                    if let Some(tu) = get_font_tounicode(&doc, &fdict) {
+                        code_to_unicode = parse_tounicode_cid_to_unicode(&tu);
+                        web_sys::console::log_1(&format!("[font_embed] font={} ToUnicode mappings={}", name, code_to_unicode.len()).into());
+                    }
+                    if code_to_unicode.is_empty() {
+                        if let Some(emb) = get_embedded_font_bytes(&doc, &fdict) {
+                            let g2u = parse_truetype_gid_to_unicode(&emb);
+                            web_sys::console::log_1(&format!("[font_embed] font={} fallback TrueType cmap mappings={}", name, g2u.len()).into());
+                            if !g2u.is_empty() {
+                                code_to_unicode = g2u;
+                            }
+                        }
                     }
                 }
+            }
+
+            // 诊断: 打印部分 code->unicode 样例, 帮助判断映射是否正确
+            if !code_to_unicode.is_empty() {
+                let sample: Vec<String> = code_to_unicode.iter().take(10).map(|(c, u)| {
+                    format!("{:04X}->{:04X}({})", c, u, char::from_u32(*u).map(|ch| ch.to_string()).unwrap_or_else(|| "?".to_string()))
+                }).collect();
+                web_sys::console::log_1(&format!("[font_embed] font={} sample code->unicode: {}", name, sample.join(", ")).into());
             }
 
             // 是否值得替换 (仅 CJK) — 用字体的真实 BaseFont 名称判断
