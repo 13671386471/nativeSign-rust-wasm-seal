@@ -1,0 +1,70 @@
+<svg width="100%" viewBox="0 0 680 472" role="img">
+  <title>落章+数字签名 数据交互时序（index.vue ↔ 胶水 dianjureader.js ↔ wasm）</title>
+  <desc>用户落章到数字签名固化的完整交互数据流转：Vue 组件经 JS 桥与 Emscripten 胶水调用 wasm 引擎方法，并接收 wasm 回调。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <style>
+    .box rect { fill:#F1EFE8; stroke:#5F5E5A; }
+    .th { font-family:sans-serif; font-weight:500; font-size:14px; fill:#2C2C2A; }
+    .ts { font-family:sans-serif; font-weight:400; font-size:13px; fill:#5F5E5A; }
+    .c-blue rect { fill:#E6F1FB; stroke:#185FA5; stroke-width:0.5; }
+    .c-teal rect { fill:#E1F5EE; stroke:#0F6E56; stroke-width:0.5; }
+  </style>
+
+  <text class="th" x="340" y="26" text-anchor="middle">落章 + 数字签名 · 交互数据流转时序</text>
+
+  <text class="th" x="60" y="46" text-anchor="middle">用户</text>
+  <text class="ts" x="60" y="62" text-anchor="middle">操作者</text>
+  <text class="th" x="165" y="46" text-anchor="middle">index.vue</text>
+  <text class="ts" x="165" y="62" text-anchor="middle">Vue 组件</text>
+  <text class="th" x="270" y="46" text-anchor="middle">ofd_plugin.js</text>
+  <text class="ts" x="270" y="62" text-anchor="middle">JS 桥 Proxy</text>
+  <text class="th" x="380" y="46" text-anchor="middle">dianjureader.js</text>
+  <text class="ts" x="380" y="62" text-anchor="middle">Emscripten 胶水</text>
+  <text class="th" x="490" y="46" text-anchor="middle">dianjureader.wasm</text>
+  <text class="ts" x="490" y="62" text-anchor="middle">C++/Qt 引擎</text>
+  <text class="th" x="600" y="46" text-anchor="middle">外部</text>
+  <text class="ts" x="600" y="62" text-anchor="middle">云签/IDB/Canvas</text>
+
+  <line x1="60" y1="72" x2="60" y2="438" stroke="#B4B2A9" stroke-width="0.5"/>
+  <line x1="165" y1="72" x2="165" y2="438" stroke="#B4B2A9" stroke-width="0.5"/>
+  <line x1="270" y1="72" x2="270" y2="438" stroke="#B4B2A9" stroke-width="0.5"/>
+  <line x1="380" y1="72" x2="380" y2="438" stroke="#B4B2A9" stroke-width="0.5"/>
+  <line x1="490" y1="72" x2="490" y2="438" stroke="#B4B2A9" stroke-width="0.5"/>
+  <line x1="600" y1="72" x2="600" y2="438" stroke="#B4B2A9" stroke-width="0.5"/>
+
+  <line x1="60" y1="118" x2="165" y2="118" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text class="ts" x="112" y="112" text-anchor="middle">① 选章 / 点击文档落点</text>
+
+  <line x1="165" y1="150" x2="490" y2="150" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text class="ts" x="327" y="144" text-anchor="middle">② SelectPoint(sealImage) 进入拾取</text>
+
+  <line x1="490" y1="182" x2="165" y2="182" stroke="#185FA5" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text class="ts" x="327" y="176" text-anchor="middle">③ 回调 window.SelectPoint(JSON{pageindex,left,top})</text>
+
+  <text class="ts" x="175" y="208" text-anchor="start">④ JS _putSealPoint: 坐标 ×50000 换算</text>
+  <text class="ts" x="175" y="224" text-anchor="start">   构造 cPages(页号,坐标,模式,印章数据)</text>
+
+  <line x1="165" y1="252" x2="490" y2="252" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text class="ts" x="327" y="246" text-anchor="middle">⑤ AddSeal(cPages,"","AUTO_ADD_SEAL_FROM_PATH") → ret</text>
+
+  <line x1="165" y1="284" x2="490" y2="284" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text class="ts" x="327" y="278" text-anchor="middle">⑥ GetSignSHAData() / GetValueEx(GET_AIPSIGN_ORIDATA,…) → oridata</text>
+
+  <line x1="165" y1="316" x2="600" y2="316" stroke="#0F6E56" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text class="ts" x="382" y="310" text-anchor="middle">⑦ 云签 POST /local/sign/sealSign{oridata,certSn,…} → {certPk,signdata}</text>
+
+  <line x1="165" y1="348" x2="490" y2="348" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text class="ts" x="327" y="342" text-anchor="middle">⑧ SetValueEx(SET_AIPSIGN_ORIDATA:certPk,lType,0,signdata) → 固化</text>
+
+  <line x1="165" y1="380" x2="490" y2="380" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text class="ts" x="327" y="374" text-anchor="middle">⑨ reploadDocData("sealsign")</text>
+
+  <line x1="490" y1="412" x2="600" y2="412" stroke="#5F5E5A" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text class="ts" x="545" y="406" text-anchor="middle">⑩ WebGL 重绘 → #screen</text>
+
+  <text class="ts" x="340" y="452" text-anchor="middle">②⑤⑥⑧⑨ 经 ofd_plugin.js(Proxy) 与 dianjureader.js(Embind 值编组) 透传至 wasm；③ 为反向回调</text>
+</svg>

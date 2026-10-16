@@ -1,0 +1,77 @@
+<svg width="100%" viewBox="0 0 680 470" role="img">
+  <title>dianjureader.wasm 引擎功能模块（由 wasm 数据段 316 个 Embind 注册字符串归纳）</title>
+  <desc>从 wasm 反编译字符串证据还原出的引擎内部功能模块：Qt GUI 框架、文档渲染、印章、数字签名与密码、文件IO、云签/UKey、打印、DI 注入、元数据文本、坐标转换。</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <style>
+    .box rect { fill:#F1EFE8; stroke:#5F5E5A; }
+    .th { font-family:sans-serif; font-weight:500; font-size:14px; fill:#2C2C2A; }
+    .ts { font-family:sans-serif; font-weight:400; font-size:13px; fill:#5F5E5A; }
+    .c-blue rect { fill:#E6F1FB; stroke:#185FA5; stroke-width:0.5; }
+    .c-teal rect { fill:#E1F5EE; stroke:#0F6E56; stroke-width:0.5; }
+  </style>
+
+  <g class="box">
+    <rect x="40" y="40" width="600" height="410" rx="20" stroke-width="0.5"/>
+    <text class="th" x="60" y="66" text-anchor="start">dianjureader.wasm · C++/Qt OFD/PDF 签章引擎</text>
+    <text class="ts" x="60" y="88" text-anchor="start">由 wasm 数据段 316 个 Embind 注册字符串归纳；Export 段仅 33 个运行时原语（API 经 Embind 动态注册）</text>
+  </g>
+
+  <g class="c-blue">
+    <rect x="56" y="110" width="276" height="52" rx="10" stroke-width="0.5"/>
+    <text class="th" x="68" y="130" text-anchor="start">Qt GUI 框架</text>
+    <text class="ts" x="68" y="150" text-anchor="start">Document · DockWidget* · Selection · Draw</text>
+  </g>
+  <g class="c-blue">
+    <rect x="348" y="110" width="276" height="52" rx="10" stroke-width="0.5"/>
+    <text class="th" x="360" y="130" text-anchor="start">云签 · 硬件 UKey</text>
+    <text class="ts" x="360" y="150" text-anchor="start">GetCloudCmdSign · GetUkeyInfo · VerifyPin · LoadWorkKey</text>
+  </g>
+
+  <g class="c-blue">
+    <rect x="56" y="174" width="276" height="52" rx="10" stroke-width="0.5"/>
+    <text class="th" x="68" y="194" text-anchor="start">文档解析 · 渲染</text>
+    <text class="ts" x="68" y="214" text-anchor="start">LoadFile · GetPage* · GetPageImg · IsBaseFont/IsCIDFont</text>
+  </g>
+  <g class="c-blue">
+    <rect x="348" y="174" width="276" height="52" rx="10" stroke-width="0.5"/>
+    <text class="th" x="360" y="194" text-anchor="start">打印</text>
+    <text class="ts" x="360" y="214" text-anchor="start">Print · PrintDoc · GetDefaultPrinterName</text>
+  </g>
+
+  <g class="c-blue">
+    <rect x="56" y="238" width="276" height="52" rx="10" stroke-width="0.5"/>
+    <text class="th" x="68" y="258" text-anchor="start">印章 Seal</text>
+    <text class="ts" x="68" y="278" text-anchor="start">AddSeal · AddDocNumSeal · GetSealList · VerifySeal · DeleteNote</text>
+  </g>
+  <g class="c-blue">
+    <rect x="348" y="238" width="276" height="52" rx="10" stroke-width="0.5"/>
+    <text class="th" x="360" y="258" text-anchor="start">DI 依赖注入接口</text>
+    <text class="ts" x="360" y="278" text-anchor="start">DI_FileOpen/Save · DI_IndexDB · DI_FontIndexDB · DI_FetchDRC</text>
+  </g>
+
+  <g class="c-blue">
+    <rect x="56" y="302" width="276" height="52" rx="10" stroke-width="0.5"/>
+    <text class="th" x="68" y="322" text-anchor="start">数字签名 · 密码</text>
+    <text class="ts" x="68" y="342" text-anchor="start">GetSignSHAData · SignData · Sign/SignPDF · SM2/SM3/RSA/P7</text>
+  </g>
+  <g class="c-blue">
+    <rect x="348" y="302" width="276" height="52" rx="10" stroke-width="0.5"/>
+    <text class="th" x="360" y="322" text-anchor="start">文档元数据 · 文本</text>
+    <text class="ts" x="360" y="342" text-anchor="start">DocTitle · GetDocText · GetDocID</text>
+  </g>
+
+  <g class="c-blue">
+    <rect x="56" y="366" width="276" height="52" rx="10" stroke-width="0.5"/>
+    <text class="th" x="68" y="386" text-anchor="start">文件 · IO</text>
+    <text class="ts" x="68" y="406" text-anchor="start">Save/SaveAs · SaveAsBase64 · LoadFileBase64 · ReadLocalFile</text>
+  </g>
+  <g class="c-blue">
+    <rect x="348" y="366" width="276" height="52" rx="10" stroke-width="0.5"/>
+    <text class="th" x="360" y="386" text-anchor="start">坐标 · 转换</text>
+    <text class="ts" x="360" y="406" text-anchor="start">ConvertXYMode* · GetCurrXYMode · SelectPoint</text>
+  </g>
+</svg>
