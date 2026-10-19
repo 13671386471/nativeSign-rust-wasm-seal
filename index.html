@@ -46,6 +46,18 @@
         .config-row select { padding: 4px 8px; border: 1px solid #d9d9d9; border-radius: 4px; }
         .page-nav { display: flex; align-items: center; gap: 8px; }
         .page-nav input { width: 50px; padding: 4px 8px; border: 1px solid #d9d9d9; border-radius: 4px; text-align: center; }
+        /* ---- 文本搜索 ---- */
+        .search-box { display: flex; align-items: center; gap: 6px; }
+        .search-box input { width: 150px; padding: 4px 8px; border: 1px solid #d9d9d9; border-radius: 4px; font-size: 13px; }
+        .search-box button { padding: 4px 10px; border: 1px solid #d9d9d9; background: #fff; border-radius: 4px; cursor: pointer; font-size: 13px; color: #595959; }
+        .search-box button:hover { border-color: #1677ff; color: #1677ff; }
+        #searchSummary { font-size: 12px; color: #999; }
+        #searchResults { display: none; max-height: 220px; overflow: auto; background: #fff; border: 1px solid #e8e8e8; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.12); margin: 6px 0; }
+        #searchResults .sr-item { padding: 8px 12px; font-size: 13px; cursor: pointer; border-bottom: 1px solid #f5f5f5; }
+        #searchResults .sr-item:hover { background: #f5f5f5; }
+        #searchResults .sr-page { color: #1677ff; font-weight: 500; margin-right: 6px; }
+        #searchResults .sr-snp { color: #595959; font-size: 12px; }
+        #searchResults .sr-empty { padding: 10px 12px; color: #999; font-size: 13px; }
         /* ---- 右键菜单 ---- */
         #sealContextMenu { display: none; position: fixed; z-index: 99999; background: white; border: 1px solid #e8e8e8; border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.12); min-width: 120px; overflow: hidden; }
         #sealContextMenu .menu-item { padding: 10px 18px; font-size: 14px; color: #262626; cursor: pointer; display: flex; align-items: center; gap: 8px; transition: background 0.15s; }
@@ -173,12 +185,18 @@
         <div class="doc-container" style="margin-top: 16px;">
             <div class="doc-header">
                 <span class="doc-title" id="docTitle">未打开文档</span>
+                <div class="search-box">
+                    <input type="text" id="searchInput" placeholder="查找文本…" />
+                    <button id="searchBtn">查找</button>
+                    <span id="searchSummary"></span>
+                </div>
                 <div class="page-nav">
                     <span style="font-size: 12px; color: #999;">页</span>
                     <input type="number" id="pageInput" min="1" value="0" onchange="goPage(this.value)" />
                     <span style="font-size: 12px; color: #999;">/ <span id="totalPages">0</span></span>
                 </div>
             </div>
+            <div id="searchResults"></div>
             <div class="doc-body">
                 <div id="spinner">
                     <div class="loading-icon">⟳</div>
@@ -735,7 +753,69 @@
             console.log('[app] 引擎就绪, 等待用户操作');
             bindInteractionEvents();
             bindSealInteraction();
+            bindSearchUI();
         };
+
+        // ============================================================
+        // 文本搜索 (search_text → PDF 内容流 / OFD 文本对象)
+        // 返回 JSON: {found, query, total, matches:[{page,count,snippet}]}
+        // ============================================================
+        function escapeHtml(s) {
+            return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+            });
+        }
+
+        async function doSearch() {
+            const input = document.getElementById('searchInput');
+            const panel = document.getElementById('searchResults');
+            const summary = document.getElementById('searchSummary');
+            const q = ((input && input.value) || '').trim();
+            if (!q) { if (panel) panel.style.display = 'none'; if (summary) summary.textContent = ''; return; }
+
+            let plugin;
+            try { plugin = await getPlugin(); } catch (e) { if (summary) summary.textContent = '引擎未就绪'; return; }
+            if (!plugin || typeof plugin.SearchText !== 'function') { if (summary) summary.textContent = '引擎不支持搜索'; return; }
+
+            if (summary) summary.textContent = '搜索中…';
+            let res;
+            try { res = await plugin.SearchText(q, 0, 0); }
+            catch (e) { if (summary) summary.textContent = '搜索失败: ' + e.message; return; }
+
+            let data;
+            try { data = JSON.parse(res); } catch (e) { if (summary) summary.textContent = '结果解析失败'; return; }
+
+            if (!data.found || !data.matches || data.matches.length === 0) {
+                if (summary) summary.textContent = '未找到';
+                if (panel) { panel.innerHTML = '<div class="sr-empty">未找到 “' + escapeHtml(q) + '”</div>'; panel.style.display = 'block'; }
+                return;
+            }
+
+            if (summary) summary.textContent = '共 ' + data.total + ' 处 / ' + data.matches.length + ' 页';
+            if (panel) {
+                panel.innerHTML = data.matches.map(function(m) {
+                    return '<div class="sr-item" data-page="' + (m.page - 1) + '">' +
+                        '<span class="sr-page">第 ' + m.page + ' 页 ×' + m.count + '</span>' +
+                        '<span class="sr-snp">' + escapeHtml(m.snippet) + '</span>' +
+                        '</div>';
+                }).join('');
+                panel.style.display = 'block';
+            }
+        }
+
+        function bindSearchUI() {
+            const btn = document.getElementById('searchBtn');
+            const input = document.getElementById('searchInput');
+            const panel = document.getElementById('searchResults');
+            if (btn) btn.addEventListener('click', doSearch);
+            if (input) input.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); doSearch(); } });
+            if (panel) panel.addEventListener('click', function(e) {
+                const it = e.target.closest ? e.target.closest('.sr-item') : null;
+                if (!it) return;
+                const idx = parseInt(it.getAttribute('data-page'), 10);
+                if (!isNaN(idx)) { scrollToPage(idx, true); panel.style.display = 'none'; }
+            });
+        }
 
         async function getPlugin() {
             if (!window.OFD_Plugin) {

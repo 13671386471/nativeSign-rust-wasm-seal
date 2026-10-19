@@ -61,6 +61,7 @@ impl DocumentEngine {
             seal_count: 0,
             signed_count: 0,
             raw_data: file_data,
+            original_data: Vec::new(),
             seals: Vec::new(),
             properties: HashMap::new(),
             undo_stack: Vec::new(),
@@ -687,20 +688,29 @@ impl DocumentEngine {
         match self.state.doc_type {
             DocType::Pdf => {
                 let page_count = self.state.page_count;
-                for p in 1..=page_count {
-                    let page_text = if let Ok(pdf) = lopdf::Document::load_mem(&self.state.raw_data) {
-                        pdf.extract_text(&[p]).unwrap_or_default()
-                    } else {
-                        continue;
-                    };
-                    let hay = if case_sensitive { page_text.clone() } else { page_text.to_lowercase() };
-                    let count = hay.matches(&q).count() as u32;
-                    if count > 0 {
-                        total += count;
-                        let snippet = make_snippet(&page_text, query, 40);
-                        matches.push(serde_json::json!({
-                            "page": p, "count": count, "snippet": snippet
-                        }));
+                // 优先用原始字节搜索: 预处理(字体嵌入)后的 PDF 常达数 MB, lopdf 解析极慢;
+                // 原始 PDF 体积小且自带 ToUnicode, 文本抽取又快又准。无原始字节时回退 raw_data。
+                let data: &[u8] = if !self.state.original_data.is_empty() {
+                    &self.state.original_data
+                } else {
+                    &self.state.raw_data
+                };
+                // 只解析一次文档, 避免每页重复 load_mem
+                if let Ok(pdf) = lopdf::Document::load_mem(data) {
+                    for p in 1..=page_count {
+                        let page_text = pdf.extract_text(&[p]).unwrap_or_default();
+                        if page_text.is_empty() {
+                            continue;
+                        }
+                        let hay = if case_sensitive { page_text.clone() } else { page_text.to_lowercase() };
+                        let count = hay.matches(&q).count() as u32;
+                        if count > 0 {
+                            total += count;
+                            let snippet = make_snippet(&page_text, query, 40);
+                            matches.push(serde_json::json!({
+                                "page": p, "count": count, "snippet": snippet
+                            }));
+                        }
                     }
                 }
             }
@@ -836,21 +846,30 @@ impl DocumentEngine {
 
 /// 从文本中截取包含 `query` 的片段 (前后各 `context` 个字符), 用于搜索结果预览
 fn make_snippet(text: &str, query: &str, context: usize) -> String {
+    // 注意: 必须按"字符"而非"字节"切片。中文是多字节 UTF-8, 直接 &text[start..end]
+    // 会落在字符中间触发 panic(wasm 下表现为 abort)。此处统一用 chars() 处理。
     let pos = text.find(query)
         .or_else(|| text.to_lowercase().find(&query.to_lowercase()));
     match pos {
-        Some(p) => {
-            let start = p.saturating_sub(context);
-            let end = (p + query.len() + context).min(text.len());
+        Some(mut p) => {
+            // 保证 p 落在字符边界 (大小写不敏感分支的 p 可能来自小写串)
+            if p > text.len() { p = text.len(); }
+            while p > 0 && !text.is_char_boundary(p) { p -= 1; }
+            let total = text.chars().count();
+            let match_chars = text[..p].chars().count();
+            let start_c = match_chars.saturating_sub(context);
+            let end_c = (match_chars + query.chars().count() + context).min(total);
             let mut s = String::new();
-            if start > 0 { s.push_str("…"); }
-            s.push_str(&text[start..end]);
-            if end < text.len() { s.push_str("…"); }
+            if start_c > 0 { s.push('…'); }
+            s.extend(text.chars().skip(start_c).take(end_c.saturating_sub(start_c)));
+            if end_c < total { s.push('…'); }
             s.replace('\n', " ").trim().to_string()
         }
         None => {
-            let end = context.saturating_mul(2).min(text.len());
-            text[..end].replace('\n', " ").trim().to_string()
+            let total = text.chars().count();
+            let end_c = context.saturating_mul(2).min(total);
+            let s: String = text.chars().take(end_c).collect();
+            s.replace('\n', " ").trim().to_string()
         }
     }
 }

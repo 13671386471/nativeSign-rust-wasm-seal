@@ -1,0 +1,83 @@
+LOAD eval err: CDP 超时：Runtime.evaluate
+LOAD STATE: running
+SEARCH STATE: running
+SEARCH RESULT: {"os":"running"}
+--- console (last 25) ---
+[log] [parse_page_content] Start tag=TextObject
+[log] [parse_page_content] Start tag=TextObject
+[log] [parse_page_content] Start tag=TextObject
+[log] [parse_page_content] Start tag=TextObject
+[log] [parse_page_content] Start tag=TextObject
+[log] [parse_page_content] Start tag=TextObject
+[log] [parse_page_content] Start tag=TextObject
+[log] [parse_page_content] Start tag=TextObject
+[log] [parse_page_content] Start tag=TextObject
+[log] [parse_page_content] Start tag=TextObject
+[log] [parse_page_content] Start tag=TextObject
+[log] [parse_page_content] End tag=ContentLayer
+[log] [parse_page_content] End tag=Area
+[log] [parse_page_content] End tag=Page
+[log] [parse_ofd] page[2] id=3 objects=50 annotations=0 physical_box=210x297
+[log] [parse_ofd] TOTAL: 3 pages parsed
+[log] [render] OFD parsed: 3 pages
+[log] [render] container client_width=1160
+[log] [render] page[0] text=31 path=0 img=0 physical=210.0x297.0
+[log] [calc_render_size] mode=FitWidth zoom=1.000 page=595.3x841.9 container=1160.0x1000.0 => canvas=1160x1640
+[log] [render] rendering page[0] canvas=1160x1640 base_scale=5.524 zoom=1.00
+[error] panicked at src\render.rs:633:59:
+end byte index 15 is not a char boundary; it is inside '则' (bytes 13..16 of string)
+
+Stack:
+
+Error
+    at __wbg_new_227d7c05414eb861 (http://127.0.0.1:8123/pkg/dianju_wasm_seal.js?v=1792396839561:1604:25)
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[3200]:0x181493
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[1328]:0x11df4e
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2387]:0x1692e6
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2893]:0x17af8f
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[191]:0x36675
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[369]:0x85f4d
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[330]:0x7bbc0
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[839]:0xeccad
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2083]:0x15f059
+
+
+[EXC] RuntimeError: unreachable
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[1328]:0x11dfb2
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2387]:0x1692e6
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2893]:0x17af8f
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[191]:0x36675
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[369]:0x85f4d
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[330]:0x7bbc0
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[839]:0xeccad
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2083]:0x15f059
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2589]:0x174a82
+    at wasm_bindgen__convert__closures_____invoke__hadfc6590e74841ba (http://127.0.0.1:8123/pkg/dianju_wasm_seal.js?v=1792396839561:1969:22)
+[error] panicked at src\lib.rs:90:31:
+RefCell already borrowed
+
+Stack:
+
+Error
+    at __wbg_new_227d7c05414eb861 (http://127.0.0.1:8123/pkg/dianju_wasm_seal.js?v=1792396839561:1604:25)
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[3200]:0x181493
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[1328]:0x11df4e
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2387]:0x1692e6
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2524]:0x171101
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[496]:0xaa824
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[839]:0xeccad
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2083]:0x15f059
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2589]:0x174a82
+    at wasm_bindgen__convert__closures_____invoke__hadfc6590e74841ba (http://127.0.0.1:8123/pkg/dianju_wasm_seal.js?v=1792396839561:1969:22)
+
+
+[EXC] RuntimeError: unreachable
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[1328]:0x11dfb2
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2387]:0x1692e6
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2524]:0x171101
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[496]:0xaa824
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[839]:0xeccad
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2083]:0x15f059
+    at http://127.0.0.1:8123/pkg/dianju_wasm_seal_bg.wasm?v=1792396839561:wasm-function[2589]:0x174a82
+    at wasm_bindgen__convert__closures_____invoke__hadfc6590e74841ba (http://127.0.0.1:8123/pkg/dianju_wasm_seal.js?v=1792396839561:1969:22)
+    at real (http://127.0.0.1:8123/pkg/dianju_wasm_seal.js?v=1792396839561:2132:20)

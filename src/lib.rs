@@ -173,16 +173,26 @@ pub async fn load_file(file_data: Vec<u8>, file_name: &str) -> Result<String, Js
         };
 
         // 第二步：预处理嵌入中文字体（仅对 PDF 文件）
-        let processed = if file_name.to_lowercase().ends_with(".pdf") {
+        let is_pdf = file_name.to_lowercase().ends_with(".pdf");
+        let processed = if is_pdf {
             font_embed::preprocess_pdf_for_cjk(&file_data)
         } else {
             file_data.to_vec()
+        };
+        // 原始字节（预处理前）仅在与预处理结果不同（即真的做了字体嵌入）时保留，
+        // 供文本搜索使用：搜索基于原始 PDF（体积小、原生 ToUnicode），
+        // 避免每次搜索都重新解析内嵌字体后数 MB 的超大 PDF（会慢到不可用）。
+        let original_for_search = if is_pdf && processed.len() != file_data.len() {
+            file_data.clone()
+        } else {
+            Vec::new()
         };
 
         // 第三步：加载文件
         engine.doc.load_file(processed, file_name)
             .map(|_| "1".to_string())
             .map_err(|e| JsValue::from_str(&e))?;
+        engine.doc.state.original_data = original_for_search;
 
         // 第四步：恢复已有签章统计（覆盖预处理文件上的空结果）
         if !existing_seals.is_empty() {

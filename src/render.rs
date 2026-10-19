@@ -625,12 +625,14 @@ impl RenderEngine {
         if idx < 20 {
             let text_preview = obj.text_items.get(0).map(|t| t.text.clone()).unwrap_or_default();
             let ctm = obj.ctm;
+            // 按字符截断预览(不能按字节 &str[..15], 中文会落在字符中间触发 panic)
+            let preview: String = text_preview.chars().take(15).collect();
             web_sys::console::log_1(&format!(
                 "[render_text #{}] font={} size={:.2}mm→{:.1}px items={} ctm=[{:.1},{:.1},{:.1},{:.1},{:.1},{:.1}] text={:?}",
                 idx, obj.font_family, obj.font_size, obj.font_size * scale,
                 obj.text_items.len(),
                 ctm[0], ctm[1], ctm[2], ctm[3], ctm[4], ctm[5],
-                if text_preview.len() > 15 { &text_preview[..15] } else { &text_preview }
+                preview
             ).into());
         }
 

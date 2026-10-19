@@ -116,8 +116,10 @@ pub struct DocState {
     pub is_opened: bool,
     pub seal_count: u32,
     pub signed_count: u32,
-    /// RAW 文档字节数据
+    /// RAW 文档字节数据 (预处理后, 用于渲染/保存)
     pub raw_data: Vec<u8>,
+    /// 原始文档字节 (字体嵌入预处理之前; 供文本搜索使用, 避免解析内嵌字体后的超大 PDF)
+    pub original_data: Vec<u8>,
     /// 印章列表 (已落章的)
     pub seals: Vec<PlacedSeal>,
     /// 文档属性 key-value
@@ -141,6 +143,7 @@ impl Default for DocState {
             seal_count: 0,
             signed_count: 0,
             raw_data: Vec::new(),
+            original_data: Vec::new(),
             seals: Vec::new(),
             properties: std::collections::HashMap::new(),
             undo_stack: Vec::new(),

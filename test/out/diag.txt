@@ -1,0 +1,34 @@
+READY: true
+STATE: done
+RESULT: {"ss":"done","se":null,"sr":"{\"found\":true,\"matches\":[{\"count\":1,\"page\":1,\"snippet\":\"劳动合同书 甲方： 中国长城科技集团股份有限公司 乙方（员工）： 楚红 地址： 深圳市南山科技园长城大厦 工号： 电话 : 电话： （ 0755 ） …\"}],\"query\":\"楚红\",\"total\":1}"}
+--- console (last 30) ---
+[log] [render_pdf] rendering page[1] target=1160x1640
+[log] [render_page] page[1] target=1160x1640
+[log] [render_page] page[1] bitmap rendered, size=1160x1641
+[log] [render_page] page[1] non_white_pixels=259180 (rgba_len=7614240, expected=7614240)
+[log] [render_page] page[1] put_image_data OK
+[log] [render_pdf] page[1] done
+[log] [render_pdf] ALL 2 pages rendered
+[log] [refresh] doc_type=Pdf page_count=2 is_opened=true
+[log] [render_pdf] START raw_data_len=8586972
+[log] [render_pdf] PDFium instance obtained
+[log] [render_pdf] PDF loaded successfully
+[log] [render_pdf] page_count=2
+[log] [render_pdf] container_w=1160 container_h=600
+[log] [calc_render_size] mode=Original zoom=1.000 page=595.3x841.9 container=1160.0x600.0 => canvas=595x841
+[log] [render_pdf] page[0] pdf_size=595.3x841.9 → target=595x841
+[log] [calc_render_size] mode=Original zoom=1.000 page=595.3x841.9 container=1160.0x600.0 => canvas=595x841
+[log] [render_pdf] page[1] pdf_size=595.3x841.9 → target=595x841
+[log] [render_pdf] rendering page[0] target=595x841
+[log] [render_page] page[0] target=595x841
+[log] [render_page] page[0] bitmap rendered, size=595x841
+[log] [render_page] page[0] non_white_pixels=91230 (rgba_len=2001580, expected=2001580)
+[log] [render_page] page[0] put_image_data OK
+[log] [render_pdf] page[0] done
+[log] [render_pdf] rendering page[1] target=595x841
+[log] [render_page] page[1] target=595x841
+[log] [render_page] page[1] bitmap rendered, size=595x841
+[log] [render_page] page[1] non_white_pixels=92229 (rgba_len=2001580, expected=2001580)
+[log] [render_page] page[1] put_image_data OK
+[log] [render_pdf] page[1] done
+[log] [render_pdf] ALL 2 pages rendered
