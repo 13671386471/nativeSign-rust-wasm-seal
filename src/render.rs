@@ -429,10 +429,14 @@ impl RenderEngine {
         web_sys::console::log_1(&format!("[render_page] page[{}] put_image_data OK", page_idx).into());
 
         // 印章叠加
+        // 注意: 已存在于 PDF 中的签章 (origin == "pdf") 会由 PDFium 渲染注释(/Widget /Sig 的
+        // 外观流)时一并绘制。若此处再叠加一层 render_seal() 的回退外观(红圈 + 名称 + 绿勾),
+        // 就会出现"真实印章 + 红圈 + 一串名称/ID"的重影。因此只叠加本会话新添加、尚未嵌入
+        // PDF 的印章(origin != "pdf")。
         let pdf_pw = page.width().value as f64;
         let pdf_ph = page.height().value as f64;
         for seal in &doc_state.seals {
-            if seal.page_index == page_idx {
+            if seal.page_index == page_idx && seal.seal_info.origin != "pdf" {
                 self.render_seal(&ctx, seal, pdf_pw, pdf_ph, bmp_w as f64, bmp_h as f64)?;
             }
         }

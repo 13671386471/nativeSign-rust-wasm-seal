@@ -56,6 +56,10 @@
 use crate::der;
 use crate::crypto;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use js_sys;
+use wasm_bindgen::prelude::JsValue;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 // ============================================================
 // MOCK 数据 — 证书和印章图片
@@ -87,11 +91,67 @@ pub const MOCK_SEAL_ESN: &[u8] = b"MOCK-ESN-2026-0001";
 pub const MOCK_ES_ID: &str = "DianJu-Mock-CA";
 
 // ============================================================
+// 注入式真实证书 / 私钥 (REPLACE_WITH_REAL_CERT 接入点)
+// ============================================================
+
+thread_local! {
+    /// 注入的真实证书 DER (base64 解码后), 按算法覆盖默认 MOCK
+    static CERT_OVERRIDE: RefCell<HashMap<SealAlgorithm, Vec<u8>>> = RefCell::new(HashMap::new());
+    /// 注入的真实私钥 DER (PKCS#8), 按算法覆盖默认 MOCK
+    static KEY_OVERRIDE: RefCell<HashMap<SealAlgorithm, Vec<u8>>> = RefCell::new(HashMap::new());
+    /// JS 注入的当前签名时间 (epoch 毫秒); None 时使用固定时间
+    static INJECTED_TIME_MS: RefCell<Option<f64>> = RefCell::new(None);
+}
+
+/// 注入真实证书与私钥 (base64)
+///
+/// `alg`: "sm2" 或 "rsa"; `cert_b64`: X.509 证书 DER 的 base64; `key_b64`: 私钥 DER(PKCS#8) 的 base64。
+/// 注入后, 所有 SES/PKCS#7 结构构造将使用真实证书; SM2 签名将使用真实私钥 (经 crypto::set_sm2_keypair)。
+pub fn set_sign_cert(alg: &str, cert_b64: &str, key_b64: &str) -> Result<(), String> {
+    let algorithm = match alg.to_lowercase().as_str() {
+        "sm2" => SealAlgorithm::Sm2,
+        "rsa" => SealAlgorithm::Rsa,
+        _ => return Err(format!("未知算法: {}", alg)),
+    };
+    let cert = BASE64.decode(cert_b64)
+        .map_err(|e| format!("证书 base64 解码失败: {}", e))?;
+    let key = BASE64.decode(key_b64)
+        .map_err(|e| format!("私钥 base64 解码失败: {}", e))?;
+    CERT_OVERRIDE.with(|c| { c.borrow_mut().insert(algorithm, cert); });
+    KEY_OVERRIDE.with(|c| { c.borrow_mut().insert(algorithm, key); });
+    if algorithm == SealAlgorithm::Sm2 {
+        crypto::set_sm2_keypair(cert_b64, key_b64)?;
+    }
+    Ok(())
+}
+
+/// 取证书 DER (优先注入值, 否则 MOCK)
+pub fn cert_der_resolved(algorithm: SealAlgorithm) -> Vec<u8> {
+    if let Some(c) = CERT_OVERRIDE.with(|c| c.borrow().get(&algorithm).cloned()) {
+        return c;
+    }
+    algorithm.cert_der().to_vec()
+}
+
+/// 取私钥 DER (优先注入值, 否则 MOCK)
+pub fn privkey_der_resolved(algorithm: SealAlgorithm) -> Vec<u8> {
+    if let Some(k) = KEY_OVERRIDE.with(|c| c.borrow().get(&algorithm).cloned()) {
+        return k;
+    }
+    algorithm.privkey_der().to_vec()
+}
+
+/// 注入当前签名时间 (epoch 毫秒), 由 JS 端实时传入
+pub fn set_injected_time_ms(ms: f64) {
+    INJECTED_TIME_MS.with(|c| { *c.borrow_mut() = Some(ms); });
+}
+
+// ============================================================
 // SES 结构体定义
 // ============================================================
 
 /// 签章算法类型
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SealAlgorithm {
     /// SM2 + SM3 (国密)
     Sm2,
@@ -291,9 +351,9 @@ pub fn build_ses_seal(params: &SesParams, seal_signature: &[u8]) -> Vec<u8> {
 pub fn build_mock_ses_seal(params: &SesParams) -> Vec<u8> {
     let e_seal_info = encode_ses_seal_info(params);
 
-    // 对 eSealInfo 进行签名 (MOCK)
+    // 对 eSealInfo 进行签名 (MOCK 数据, 真实算法)
     let seal_sig = match params.algorithm {
-        SealAlgorithm::Sm2 => crypto::sm2_sign(&e_seal_info, params.algorithm.privkey_der())
+        SealAlgorithm::Sm2 => crypto::sm2_sign(&e_seal_info, &privkey_der_resolved(params.algorithm))
             .unwrap_or_default(),
         SealAlgorithm::Rsa => crypto::rsa_sign(&e_seal_info)
             .unwrap_or_default(),
@@ -343,7 +403,7 @@ pub fn build_tbs_sign(params: &SesParams, doc_hash: &[u8]) -> Vec<u8> {
         // signatureValue: 原文摘要值
         der::bit_string(doc_hash, 0),
         // cert: 签名者证书
-        params.cert_der.to_vec(),
+        cert_der_resolved(params.algorithm),
     ])
 }
 
@@ -399,9 +459,9 @@ pub fn build_mock_ses_signature(params: &SesParams, doc_data: &[u8]) -> Vec<u8> 
     // 2. 构建 TBS_Sign
     let tbs_sign = build_tbs_sign(params, &doc_hash);
 
-    // 3. 对 TBS_Sign 进行签名 (MOCK)
+    // 3. 对 TBS_Sign 进行签名 (MOCK 数据, 真实算法)
     let signature = match params.algorithm {
-        SealAlgorithm::Sm2 => crypto::sm2_sign(&tbs_sign, params.algorithm.privkey_der())
+        SealAlgorithm::Sm2 => crypto::sm2_sign(&tbs_sign, &privkey_der_resolved(params.algorithm))
             .unwrap_or_default(),
         SealAlgorithm::Rsa => crypto::rsa_sign(&tbs_sign)
             .unwrap_or_default(),
@@ -479,7 +539,7 @@ pub fn ses_params_from_seal_info(
         seal_name,
         seal_image,
         image_format: "PNG".to_string(),
-        cert_der: algorithm.cert_der().to_vec(),
+        cert_der: cert_der_resolved(algorithm),
         sign_time: now,
         cert_valid_start: (2025, 1, 1, 0, 0, 0),
         cert_valid_end: (2030, 12, 31, 23, 59, 59),
@@ -488,11 +548,26 @@ pub fn ses_params_from_seal_info(
     }
 }
 
-/// 获取当前时间元组 (年, 月, 日, 时, 分, 秒) — 简化版
-/// 注意: WASM 环境中无法直接获取系统时间, 使用编译时时间或固定时间
+/// 获取当前时间元组 (年, 月, 日, 时, 分, 秒)
+///
+/// 优先使用 JS 注入的真实时间 (set_injected_time_ms); 未注入时回退固定时间。
 pub fn current_time_tuple() -> (u32, u32, u32, u32, u32, u32) {
-    // WASM 中无法获取真实系统时间, 使用固定时间
-    // 生产环境应通过 JS 注入时间
+    if let Some(ms) = INJECTED_TIME_MS.with(|c| *c.borrow()) {
+        // 用 js_sys::Date 把 epoch 毫秒拆成 UTC 分量
+        #[cfg(target_arch = "wasm32")]
+        {
+            let date = js_sys::Date::new(&JsValue::from_f64(ms));
+            return (
+                date.get_utc_full_year() as u32,
+                (date.get_utc_month() as u32) + 1,
+                date.get_utc_date() as u32,
+                date.get_utc_hours() as u32,
+                date.get_utc_minutes() as u32,
+                date.get_utc_seconds() as u32,
+            );
+        }
+    }
+    // 未注入时间时的固定回退值 (仅用于测试/离线)
     (2026, 7, 10, 16, 30, 0)
 }
 

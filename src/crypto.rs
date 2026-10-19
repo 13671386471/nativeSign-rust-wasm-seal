@@ -32,6 +32,10 @@ pub const MOCK_RSA_CERT: &str = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQCbCjqtkT8
 pub const MOCK_SM2_CERT: &str = "MFkwEwYHKoZIzj0CAQYIKoEcz1UBgi0DQgAEgLHeUjG9svZEuBUFh1zICkk76BUZwGjBYkU4CgmlSS/ra5/ip2EaedAxAwRc/TaKZ8EANZIg0TbPKEeS48x9ww==";
 // FIXME: REPLACE_WITH_REAL_CERT — 替换为真实SM2证书
 
+/// RSA 私钥 (PKCS#8 DER, base64) — 测试密钥, 生产环境通过 set_sm2_keypair / set_sign_cert 注入真实密钥
+/// 注意: 此处的 MOCK_RSA_PRIVKEY_DER 与 ses.rs 中的为同一文件, 仅用于真实 RSA 算法演示
+pub const MOCK_RSA_PRIVKEY_DER: &[u8] = include_bytes!("../mock_data/mock_rsa_key.der");
+
 // ============================================================
 // SM3 哈希 (国密标准 GM/T 0004-2012) — 真实实现
 // ============================================================
@@ -91,14 +95,33 @@ struct Sm2KeyPair {
 /// SM2 密钥对全局缓存 — 首次使用时由 libsm 随机生成
 static SM2_KEYPAIR: OnceLock<Sm2KeyPair> = OnceLock::new();
 
+/// SM2 密钥对覆盖 — 生产环境通过 set_sm2_keypair 注入真实证书对应的私钥
+static SM2_KEYPAIR_OVERRIDE: OnceLock<Sm2KeyPair> = OnceLock::new();
+
+/// 注入真实 SM2 公钥/私钥 (base64, 由真实 CA 证书导出)
+///
+/// 调用后, 所有 SM2 签名/验签将使用注入的密钥, 而非随机生成的演示密钥。
+/// 这是 REPLACE_WITH_REAL_CERT 的关键接入点之一。
+pub fn set_sm2_keypair(pub_b64: &str, priv_b64: &str) -> Result<(), String> {
+    let pubkey = BASE64.decode(pub_b64)
+        .map_err(|e| format!("SM2 公钥 base64 解码失败: {}", e))?;
+    let seckey = BASE64.decode(priv_b64)
+        .map_err(|e| format!("SM2 私钥 base64 解码失败: {}", e))?;
+    SM2_KEYPAIR_OVERRIDE.set(Sm2KeyPair { pubkey, seckey })
+        .map_err(|_| "SM2 密钥已被设置, 不能重复设置".to_string())
+}
+
 /// 获取或生成 SM2 密钥对
 ///
-/// 首次调用时使用 libsm 生成随机 SM2 密钥对 (sm2p256v1 曲线),
-/// 后续调用直接返回缓存。密钥对在 WASM 模块生命周期内保持不变。
+/// 优先返回注入的真实密钥 (SM2_KEYPAIR_OVERRIDE); 若未注入, 首次调用时使用 libsm
+/// 生成随机 SM2 密钥对 (sm2p256v1 曲线), 后续调用直接返回缓存。
 ///
-/// ⚠️ MOCK 说明: 每次加载 WASM 时密钥对不同, 不具备持久性。
-/// FIXME: REPLACE_WITH_REAL_CERT — 生产环境应加载固定 SM2 证书和私钥。
+/// ⚠️ MOCK 说明: 未注入真实密钥时, 每次加载 WASM 密钥对不同, 不具备持久性。
+/// FIXME: REPLACE_WITH_REAL_CERT — 生产环境应通过 set_sm2_keypair 加载固定 SM2 证书私钥。
 fn ensure_sm2_keypair() -> &'static Sm2KeyPair {
+    if let Some(kp) = SM2_KEYPAIR_OVERRIDE.get() {
+        return kp;
+    }
     SM2_KEYPAIR.get_or_init(|| {
         let ctx = SigCtx::new();
         let (pk, sk) = ctx.new_keypair()
@@ -226,18 +249,24 @@ pub fn sm4_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, String
 }
 
 // ============================================================
-// RSA 签名 — 假数据实现 (非国密算法, 仅用于兼容)
+// RSA 签名 — 真实实现 (PKCS#1 v1.5 + SHA256, 使用 rsa crate)
 // ============================================================
 
-/// RSA PKCS#1v1.5 签名
-/// FIXME: REPLACE_WITH_REAL_CERT — 生产环境中签名应在云端服务中完成
-pub fn rsa_sign(_data: &[u8]) -> Result<Vec<u8>, String> {
-    // RSA 签名 = 对 SHA256 哈希用私钥加密
-    // 生产环境应使用云端服务或 UKey 硬件签名
-    let digest = sha256(_data);
-    let mut sig = vec![0u8; 256];
-    sig[0..32].copy_from_slice(&digest);
-    Ok(sig)
+/// RSA PKCS#1 v1.5 签名 (SHA256 摘要)
+///
+/// 使用 rsa crate 对 SHA256 摘要做真实的 RSA 私钥签名, 输出 256 字节签名值
+/// (与 2048 位密钥对应)。签名可被任意标准工具 (OpenSSL / x509-parser) 验签。
+///
+/// ⚠️ 当前使用 MOCK_RSA_PRIVKEY_DER (测试私钥) 作为演示; 生产环境应通过
+/// REPLACE_WITH_REAL_CERT 注入真实 RSA 私钥, 或改为调用云签/UKey 完成私钥运算。
+pub fn rsa_sign(data: &[u8]) -> Result<Vec<u8>, String> {
+    use rsa::pkcs8::DecodePrivateKey;
+    let key = rsa::RsaPrivateKey::from_pkcs8_der(MOCK_RSA_PRIVKEY_DER)
+        .map_err(|e| format!("RSA 私钥加载失败: {}", e))?;
+    let padding = rsa::Pkcs1v15Sign::new::<Sha256>();
+    let digest = sha256(data);
+    key.sign(padding, &digest)
+        .map_err(|e| format!("RSA 签名失败: {}", e))
 }
 
 /// 获取模拟的 SM2 证书公钥
@@ -393,5 +422,18 @@ mod tests {
     fn test_sm4_wrong_iv_length() {
         let result = sm4_encrypt(b"data", &[0u8; 16], &[0u8; 15]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rsa_sign_and_verify() {
+        use rsa::pkcs8::DecodePrivateKey;
+        let data = b"hello rsa sign";
+        let sig = rsa_sign(data).expect("RSA sign should succeed");
+        assert_eq!(sig.len(), 256); // 2048-bit 密钥 → 256 字节签名
+        let key = rsa::RsaPrivateKey::from_pkcs8_der(MOCK_RSA_PRIVKEY_DER)
+            .expect("load mock rsa privkey");
+        let padding = rsa::Pkcs1v15Sign::new::<sha2::Sha256>();
+        let digest = sha256(data);
+        assert!(key.verify(padding, &digest, &sig).is_ok(), "RSA verify should pass");
     }
 }

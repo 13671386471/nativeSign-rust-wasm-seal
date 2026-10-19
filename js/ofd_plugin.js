@@ -181,6 +181,19 @@ function createOFDPlugin(wasmModule) {
     return mod.get_seal_info_json();
   }
 
+  /**
+   * 签章命中测试（同步）
+   * @param {number} page - 页码（从0开始）
+   * @param {number} canvasW - canvas CSS 显示宽度
+   * @param {number} canvasH - canvas CSS 显示高度
+   * @param {number} x - 点击 x 坐标（相对 canvas 左上角，CSS 像素）
+   * @param {number} y - 点击 y 坐标（相对 canvas 左上角，CSS 像素）
+   * @returns {string|null} 命中签章 JSON（含 css_x/css_y/css_w/css_h），未命中返回 null
+   */
+  function HitTestSeal(page, canvasW, canvasH, x, y) {
+    return mod.hit_test_seal(page, canvasW, canvasH, x, y);
+  }
+
   async function GetNextNote(nodeType, index, param) {
     return mod.get_next_note(nodeType, index, param);
   }
@@ -441,6 +454,7 @@ function createOFDPlugin(wasmModule) {
     CloseDoc,
     getSignaturesCount,
     GetSealInfoJson,
+    HitTestSeal,
     GetNextNote,
     DeleteNote,
 

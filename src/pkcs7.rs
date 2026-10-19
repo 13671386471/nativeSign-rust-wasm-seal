@@ -315,10 +315,10 @@ pub fn build_mock_pkcs7(
     doc_hash: &[u8],
     sign_time: (u32, u32, u32, u32, u32, u32),
 ) -> Vec<u8> {
-    let cert_der = algorithm.cert_der();
+    let cert_der = crate::ses::cert_der_resolved(algorithm);
 
     // 构建 authenticatedAttributes 并计算其摘要
-    let (issuer_der, serial_der) = extract_issuer_and_serial(cert_der);
+    let (issuer_der, serial_der) = extract_issuer_and_serial(&cert_der);
     let sid = der::sequence(&[issuer_der, serial_der]);
 
     let content_type_attr = der::sequence(&[
@@ -354,7 +354,7 @@ pub fn build_mock_pkcs7(
 
     // 对 authenticatedAttributes 摘要进行签名 (MOCK)
     let encrypted_digest = match algorithm {
-        SealAlgorithm::Sm2 => crate::crypto::sm2_sign(&auth_attrs_hash, algorithm.privkey_der())
+        SealAlgorithm::Sm2 => crate::crypto::sm2_sign(&auth_attrs_hash, &crate::ses::privkey_der_resolved(algorithm))
             .unwrap_or_default(),
         SealAlgorithm::Rsa => crate::crypto::rsa_sign(&auth_attrs_hash)
             .unwrap_or_default(),
@@ -362,7 +362,7 @@ pub fn build_mock_pkcs7(
 
     build_pkcs7_signed_data(
         algorithm,
-        cert_der,
+        &cert_der,
         ses_signature_der,
         doc_hash,
         sign_time,

@@ -1,0 +1,15 @@
+[log] [pdfium] 开始加载 PDFium WASM 模块…
+[log] [pdfium] PDFium WASM 模块加载完成
+[log] [boot] PDFium 已就绪, 开始加载 Rust WASM 引擎
+[log] [boot] Rust WASM 引擎加载成功
+[log] [boot] PDFium 模块绑定成功
+[log] [boot] 开始加载中文字体...
+[log] [font_provider] 注册字体: name=default key=default size=8136KB
+[log] [boot] 本地字体加载成功, 大小: 8331336 bytes
+[log] [font] 获取到函数表: WebAssembly.Table(原生) length=3259
+[log] [font] ✅ 函数表就绪, 长度=3259
+[log] [font] ✅ 用 addFunction 分配入口: {"Release":3259,"MapFont":3260,"GetFont":3261,"GetFontData":3262,"GetFaceName":3263,"GetFontCharset":3264,"DeleteFont":3265}
+[log] [font] ✅ 中文字体提供器安装成功 (mode=addFunction)
+[log] [boot] 引擎初始化完成, 版本: dianju-wasm-seal v0.1.0 (Rust WASM + SES)
+[log] [boot] OFD_Plugin API 就绪
+[log] [app] 引擎就绪, 等待用户操作

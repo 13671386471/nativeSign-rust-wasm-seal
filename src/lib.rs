@@ -44,6 +44,7 @@ mod font_embed;
 
 use wasm_bindgen::prelude::*;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use web_sys;
 // ============================================================
 // 全局单例 — 引擎状态管理
@@ -58,7 +59,6 @@ struct WasmerEngine {
     doc: engine::DocumentEngine,
     sign: sign::SignEngine,
     seal: seal::SealEngine,
-    ukey: ukey::UkeyEngine,
     render: render::RenderEngine,
     /// 当前落章参数
     current_seal_info: Option<types::SealInfo>,
@@ -74,7 +74,6 @@ impl WasmerEngine {
             doc: engine::DocumentEngine::new(),
             sign: sign::SignEngine::new(),
             seal: seal::SealEngine,
-            ukey: ukey::UkeyEngine::new(),
             render: render::RenderEngine::new("screen"),
             current_seal_info: None,
             seal_pool: Vec::new(),
@@ -359,6 +358,17 @@ pub async fn get_seal_info_json() -> String {
     with_engine(|engine| engine.doc.get_seal_info_json())
 }
 
+/// 签章命中测试
+/// 输入为 canvas 的 CSS 显示尺寸与点击坐标（相对 canvas 左上角），
+/// 命中时返回签章信息 JSON（含 css_x/css_y/css_w/css_h 用于前端绘制选框），未命中返回 null。
+#[wasm_bindgen]
+pub fn hit_test_seal(page: i32, canvas_w: f64, canvas_h: f64, x: f64, y: f64) -> Option<String> {
+    if page < 0 {
+        return None;
+    }
+    with_engine(|engine| engine.doc.hit_test_seal(page as u32, canvas_w, canvas_h, x, y))
+}
+
 /// 获取下一页注释节点
 #[wasm_bindgen]
 pub async fn get_next_note(node_type: &str, index: i32, param: &str) -> Option<String> {
@@ -403,6 +413,14 @@ pub async fn add_seal(c_pages: &str, _reserved: &str, _mode: &str) -> i32 {
             match result {
                 Ok(count) => {
                     engine.doc.state.seal_count = count as u32;
+
+                    // 记录撤销操作 (新增的印章)
+                    if count > 0 {
+                        let idx = (count - 1) as usize;
+                        if let Some(seal) = engine.doc.state.seals.get(idx).cloned() {
+                            engine.doc.record_add(idx, seal);
+                        }
+                    }
 
                     // 准备签名数据 — 存储文档数据和印章信息到 SignEngine
                     let doc_data = engine.doc.state.raw_data.clone();
@@ -528,66 +546,62 @@ pub async fn set_single_mode(enabled: bool) {
 
 // ---- UKey 操作 API ----
 
+/// 设置 UKey WebSocket 代理地址 (REPLACE_WITH_REAL_UKEY_PROXY 接入点)
+#[wasm_bindgen]
+pub fn set_ukey_ws_url(url: &str) {
+    ukey::set_ukey_ws_url(url);
+}
+
+/// 建立 UKey WebSocket 连接
+#[wasm_bindgen]
+pub fn open_ukey_ws() -> Result<(), JsValue> {
+    ukey::open_ukey_ws().map_err(|e| JsValue::from_str(&e))
+}
+
+/// 关闭 UKey WebSocket 连接
+#[wasm_bindgen]
+pub fn close_ukey_ws() {
+    ukey::close_ukey_ws();
+}
+
 /// 获取 UKey 设备信息
 #[wasm_bindgen]
 pub async fn get_ukey_info(param: i32) -> String {
-    with_engine(|engine| {
-        // 由于异步限制，使用简化的同步返回
-        // FIXME: 生产环境需支持真正的异步
-        let result = futures::executor::block_on(engine.ukey.get_ukey_info(param));
-        result.unwrap_or_default()
-    })
+    ukey::get_ukey_info(param).await.unwrap_or_default()
 }
 
 /// 验证 UKey PIN 码
 #[wasm_bindgen]
 pub async fn verify_pin(pin_code: &str) -> String {
-    with_engine(|engine| {
-        let result = futures::executor::block_on(engine.ukey.verify_pin(pin_code));
-        result.unwrap_or_else(|e| format!(r#"{{"status":-1,"errmsg":"{}"}}"#, e))
-    })
+    ukey::verify_pin(pin_code)
+        .await
+        .unwrap_or_else(|e| format!(r#"{{"status":-1,"errmsg":"{}"}}"#, e))
 }
 
 /// 获取 UKey 印章列表 (base64 JSON)
 #[wasm_bindgen]
 pub async fn get_seal_list_json() -> String {
-    with_engine(|engine| {
-        let result = futures::executor::block_on(engine.ukey.get_seal_list_json());
-        result.unwrap_or_default()
-    })
+    ukey::get_seal_list_json().await.unwrap_or_default()
 }
 
 /// 获取 UKey 印章图像
 #[wasm_bindgen]
 pub async fn get_seal_image(dev_id: &str, seal_id: &str) -> String {
-    with_engine(|engine| {
-        let result = futures::executor::block_on(
-            engine.ukey.get_seal_image(dev_id, seal_id)
-        );
-        result.unwrap_or_default()
-    })
+    ukey::get_seal_image(dev_id, seal_id).await.unwrap_or_default()
 }
 
 /// 获取 UKey 印章数据
 #[wasm_bindgen]
 pub async fn get_seal_data(dev_id: &str, seal_id: &str) -> String {
-    with_engine(|engine| {
-        let result = futures::executor::block_on(
-            engine.ukey.get_seal_data(dev_id, seal_id)
-        );
-        result.unwrap_or_default()
-    })
+    ukey::get_seal_data(dev_id, seal_id).await.unwrap_or_default()
 }
 
 /// UKey 硬件签名
 #[wasm_bindgen]
 pub async fn sign_data(data: &str, pin_code: &str) -> String {
-    with_engine(|engine| {
-        let result = futures::executor::block_on(
-            engine.ukey.sign_data(data, pin_code)
-        );
-        result.unwrap_or_else(|e| format!("error:{}", e))
-    })
+    ukey::sign_data(data, pin_code)
+        .await
+        .unwrap_or_else(|e| format!("error:{}", e))
 }
 
 // ---- 渲染操作 API ----
@@ -694,11 +708,79 @@ pub async fn perform_click(action: &str) {
 }
 
 /// 显示文件选择对话框
+///
+/// 通过 JS 创建隐藏的 `<input type="file">` 并触发点击, 用户在浏览器原生文件选择器中
+/// 选好后, Promise 解析为所选文件名 (含扩展名)。取消选择则解析为 None。
+/// `_filter` 可传如 ".pdf,.ofd" 作为 accept 过滤。
 #[wasm_bindgen]
 pub async fn show_dialog(_mode: i32, _title: &str, _default_path: &str, _filter: &str) -> Option<String> {
-    // 通过 JS 互操作触发文件选择
-    // FIXME: 生产环境需实现完整的文件对话框
-    None
+    let p = js_sys::Promise::new(&mut |resolve, reject| {
+        let resolve = resolve.clone();
+        let reject = reject.clone();
+
+        let document = match web_sys::window().and_then(|w| w.document()) {
+            Some(d) => d,
+            None => {
+                let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("no document"));
+                return;
+            }
+        };
+        let input = match document.create_element("input") {
+            Ok(el) => match el.dyn_into::<web_sys::HtmlInputElement>() {
+                Ok(i) => i,
+                Err(_) => {
+                    let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("input cast failed"));
+                    return;
+                }
+            },
+            Err(_) => {
+                let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("input create failed"));
+                return;
+            }
+        };
+        input.set_type("file");
+        if !_filter.is_empty() {
+            input.set_accept(_filter);
+        }
+
+        let input_for_closure = input.clone();
+        let onchange = wasm_bindgen::closure::Closure::wrap(Box::new(move || {
+            let name = input_for_closure
+                .files()
+                .and_then(|files| {
+                    if files.length() > 0 {
+                        files.get(0).map(|f| f.name())
+                    } else {
+                        None
+                    }
+                });
+            match name {
+                Some(n) => {
+                    let _ = resolve.call1(&JsValue::NULL, &JsValue::from_str(&n));
+                }
+                None => {
+                    let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("cancelled"));
+                }
+            }
+        }) as Box<dyn FnMut()>);
+        input.set_onchange(Some(onchange.as_ref().unchecked_ref()));
+        onchange.forget(); // 一次性对话框, 保留闭包
+
+        // 隐藏并挂到 body 上再触发点击
+        let _ = input.set_attribute("style", "display:none");
+        if let Some(body) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.body())
+        {
+            let _ = body.append_child(&input);
+        }
+        let _ = input.click();
+    });
+
+    match wasm_bindgen_futures::JsFuture::from(p).await {
+        Ok(v) => v.as_string(),
+        Err(_) => None,
+    }
 }
 
 /// 关闭弹出菜单
@@ -708,10 +790,13 @@ pub fn close_popup_menu() {
 }
 
 /// 搜索文本
+///
+/// 在文档全文中检索关键词, 返回 JSON:
+/// {"found":bool,"query":str,"total":u32,"matches":[{"page":u32,"count":u32,"snippet":str}]}
+/// flags 第 0 位置 1 表示区分大小写。PDF 用 lopdf 真实文本抽取, OFD 遍历解析文本对象。
 #[wasm_bindgen]
-pub async fn search_text(_text: &str, _flags: i32, _options: i32) -> String {
-    // FIXME: 实现文本搜索
-    "0".to_string()
+pub async fn search_text(text: &str, flags: i32, _options: i32) -> String {
+    with_engine(|engine| engine.doc.search_text(text, flags))
 }
 
 /// 设置 JS 环境变量
@@ -820,29 +905,122 @@ pub async fn get_file_info(_file_handle: i32, _info_type: &str) -> i32 {
 
 // ---- HTTP 上传 API ----
 
-/// 初始化 HTTP 上传
+thread_local! {
+    static HTTP_POST_PARAMS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    static HTTP_FILE_FIELD: RefCell<Option<String>> = RefCell::new(None);
+}
+
+/// 初始化 HTTP 上传 (清空历史参数)
 #[wasm_bindgen]
 pub fn http_init() {
-    // 为 HTTP 上传做初始化
+    HTTP_POST_PARAMS.with(|p| p.borrow_mut().clear());
+    HTTP_FILE_FIELD.with(|f| *f.borrow_mut() = None);
 }
 
 /// 添加 POST 参数字符串
 #[wasm_bindgen]
-pub fn http_add_post_string(_key: &str, _value: &str) {
-    // 暂存 POST 参数
+pub fn http_add_post_string(key: &str, value: &str) {
+    HTTP_POST_PARAMS.with(|p| {
+        p.borrow_mut().insert(key.to_string(), value.to_string());
+    });
 }
 
-/// 添加当前文件到 POST
+/// 添加当前已加载的文档到上传表单 (作为文件字段)
+///
+/// `field_name`: 表单字段名 (如 "file")
 #[wasm_bindgen]
-pub fn http_add_post_curr_file(_field_name: &str) {
-    // 将当前文档数据添加到上传表单
+pub fn http_add_post_curr_file(field_name: &str) {
+    HTTP_FILE_FIELD.with(|f| *f.borrow_mut() = Some(field_name.to_string()));
 }
 
-/// HTTP POST 上传
+/// HTTP POST 上传 (multipart/form-data)
+///
+/// 用 web-sys 的 fetch + FormData 真实发起 POST 请求:
+/// - 已 add 的字符串参数作为普通字段
+/// - 当前文档数据作为文件字段 (字段名由 http_add_post_curr_file 指定)
+/// 返回服务端响应文本, 失败返回 None。
 #[wasm_bindgen]
-pub async fn http_post(_url: &str) -> Option<String> {
-    // FIXME: 实现真正的 HTTP POST 上传
-    None
+pub async fn http_post(url: &str) -> Option<String> {
+    let window = match web_sys::window() {
+        Some(w) => w,
+        None => {
+            web_sys::console::error_1(&"[http_post] 无法获取 window".into());
+            return None;
+        }
+    };
+
+    let form = match web_sys::FormData::new() {
+        Ok(f) => f,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[http_post] FormData 创建失败: {:?}", e).into());
+            return None;
+        }
+    };
+
+    // 追加字符串参数
+    HTTP_POST_PARAMS.with(|p| {
+        for (k, v) in p.borrow().iter() {
+            let _ = form.append_with_str(k, v);
+        }
+    });
+
+    // 追加当前文档作为文件
+    if let Some(field) = HTTP_FILE_FIELD.with(|f| f.borrow().clone()) {
+        let data = with_engine(|engine| engine.doc.state.raw_data.clone());
+        if !data.is_empty() {
+            let uint8 = js_sys::Uint8Array::from(data.as_slice());
+            let array = js_sys::Array::new();
+            array.push(&uint8.unchecked_into::<JsValue>());
+            let parts: JsValue = array.unchecked_into();
+            match web_sys::Blob::new_with_u8_slice_sequence(&parts) {
+                Ok(blob) => {
+                    let _ = form.append_with_blob(&field, &blob);
+                }
+                Err(e) => {
+                    web_sys::console::error_1(&format!("[http_post] Blob 创建失败: {:?}", e).into());
+                }
+            }
+        }
+    }
+
+    let opts = web_sys::RequestInit::new();
+    opts.set_method("POST");
+    opts.set_body(&form.into());
+    opts.set_mode(web_sys::RequestMode::Cors);
+
+    let promise = window.fetch_with_str_and_init(url, &opts);
+
+    let resp_val = match wasm_bindgen_futures::JsFuture::from(promise).await {
+        Ok(v) => v,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[http_post] 请求失败: {:?}", e).into());
+            return None;
+        }
+    };
+
+    let resp: web_sys::Response = match resp_val.dyn_into() {
+        Ok(r) => r,
+        Err(_) => {
+            web_sys::console::error_1(&"[http_post] 响应类型转换失败".into());
+            return None;
+        }
+    };
+
+    let text_promise = match resp.text() {
+        Ok(p) => p,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[http_post] 读取响应失败: {:?}", e).into());
+            return None;
+        }
+    };
+
+    match wasm_bindgen_futures::JsFuture::from(text_promise).await {
+        Ok(v) => v.as_string(),
+        Err(e) => {
+            web_sys::console::error_1(&format!("[http_post] 响应文本解析失败: {:?}", e).into());
+            None
+        }
+    }
 }
 
 // ---- 撤销/重做 ----
@@ -850,25 +1028,37 @@ pub async fn http_post(_url: &str) -> Option<String> {
 /// 检查是否可撤销
 #[wasm_bindgen]
 pub async fn can_undo() -> i32 {
-    0
+    with_engine(|engine| if engine.doc.can_undo() { 1 } else { 0 })
 }
 
 /// 撤销操作
 #[wasm_bindgen]
 pub async fn undo() -> String {
-    "0".to_string()
+    let ok = with_engine(|engine| engine.doc.undo());
+    if ok {
+        refresh_render();
+        "1".to_string()
+    } else {
+        "0".to_string()
+    }
 }
 
 /// 检查是否可重做
 #[wasm_bindgen]
 pub async fn can_redo() -> i32 {
-    0
+    with_engine(|engine| if engine.doc.can_redo() { 1 } else { 0 })
 }
 
 /// 重做操作
 #[wasm_bindgen]
 pub async fn redo() -> String {
-    "0".to_string()
+    let ok = with_engine(|engine| engine.doc.redo());
+    if ok {
+        refresh_render();
+        "1".to_string()
+    } else {
+        "0".to_string()
+    }
 }
 
 // ---- 引擎生命周期 ----
@@ -1192,6 +1382,52 @@ pub fn set_sign_config(algorithm: &str, is_sm2_seal: bool, sign_mode: &str, file
             engine.sign_config.file_format
         ).into());
     });
+}
+
+/// 注入真实签名证书与私钥 (base64 DER), 覆盖 MOCK 证书
+///
+/// `alg`: "sm2" / "rsa"; `cert_b64`: X.509 证书 DER 的 base64;
+/// `key_b64`: 私钥 DER(PKCS#8) 的 base64。注入后, 所有 SES/PKCS#7 结构构造将使用
+/// 真实证书; SM2 签名将使用真实私钥。这是 REPLACE_WITH_REAL_CERT 的主接入点。
+#[wasm_bindgen]
+pub fn set_sign_cert(alg: &str, cert_b64: &str, key_b64: &str) -> Result<(), JsValue> {
+    ses::set_sign_cert(alg, cert_b64, key_b64)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// 注入当前签名时间 (epoch 毫秒)
+///
+/// 由 JS 端传入真实本地时间, 使 SES 签名时间、PKCS#7 SigningTime 与客户端一致。
+/// 未注入时回退到固定时间。
+#[wasm_bindgen]
+pub fn set_current_time(epoch_ms: f64) {
+    ses::set_injected_time_ms(epoch_ms);
+}
+
+/// 设置云签服务地址 (REPLACE_WITH_REAL_SIGN_SERVICE 接入点)
+#[wasm_bindgen]
+pub fn set_cloud_sign_url(url: &str) {
+    sign::SignEngine::set_cloud_sign_url(url);
+}
+
+/// 调用云签服务完成签名 (真实 HTTP 请求)
+///
+/// 把待签名数据发往 set_cloud_sign_url 配置的远端服务, 由其私钥完成签名。
+/// 返回 CloudSignResponse 的 JSON (含 signResult / signCert / signCertSn / code)。
+#[wasm_bindgen]
+pub async fn cloud_sign(
+    file_id: &str,
+    cert_sn: &str,
+    sign_content: &str,
+    data_type: &str,
+    data_format: &str,
+    seal_id: &str,
+) -> Result<String, JsValue> {
+    let resp = sign::SignEngine::cloud_sign_http(
+        file_id, cert_sn, sign_content, data_type, data_format, seal_id,
+    ).await
+        .map_err(|e| JsValue::from_str(&e))?;
+    serde_json::to_string(&resp).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// 获取当前文档的 SES 签章信息 (JSON)

@@ -63,22 +63,31 @@ impl DocumentEngine {
             raw_data: file_data,
             seals: Vec::new(),
             properties: HashMap::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         };
 
         Ok(())
     }
 
     /// 解析 PDF 文档获取页数等信息
+    ///
+    /// 优先使用 lopdf 完整解析页面树 (可靠, 兼容压缩/线性化 PDF);
+    /// 解析失败 (如加密/损坏) 时回退到文本扫描法。
     fn parse_pdf_info(&self, data: &[u8]) -> Result<u32, String> {
-        // PDF 解析 — 提取页数
-        // PDF 文件通过 /Count 指令获取总页数; 需要跳过 /Count 后的空白字符
-        let text = String::from_utf8_lossy(data);
+        // 方法1 (主): 用 lopdf 解析真实页面树
+        if let Ok(pdf) = lopdf::Document::load_mem(data) {
+            let pages = pdf.get_pages();
+            if pages.len() > 0 {
+                return Ok(pages.len() as u32);
+            }
+        }
 
-        // 方法1: 查找所有 /Count 指令, 取最大值(可处理嵌套 Pages 树)
+        // 方法2 (回退): 文本扫描 — 查找所有 /Count 指令, 取最大值(可处理嵌套 Pages 树)
+        let text = String::from_utf8_lossy(data);
         let mut max_count = 0u32;
         for (pos, _) in text.match_indices("/Count") {
             let after_count = &text[pos + 6..];
-            // 跳过空白前缀, 找到数字起始位置
             let digits_start = after_count
                 .find(|c: char| c.is_ascii_digit())
                 .unwrap_or(after_count.len());
@@ -89,18 +98,17 @@ impl DocumentEngine {
                 }
             }
         }
-
         if max_count > 0 {
             return Ok(max_count);
         }
 
-        // 方法2: 统计 /Type /Page 出现次数(不包含 /Pages)
+        // 方法3 (回退): 统计 /Type /Page 出现次数(不包含 /Pages)
         let page_count = text.matches("/Type /Page").count() as u32;
         if page_count > 0 {
             return Ok(page_count);
         }
 
-        // 方法3: 统计 /Type/Page 对象的数量
+        // 方法4 (回退): 统计 /Type/Page 对象的数量
         let page_count = text.matches("/Type/Page").count() as u32;
         if page_count > 0 {
             return Ok(page_count);
@@ -532,6 +540,61 @@ impl DocumentEngine {
         serde_json::to_string(&self.state.seals).unwrap_or_else(|_| "[]".to_string())
     }
 
+    /// 命中测试：判断点 (x,y) 是否落在第 page 页的某个签章区域内。
+    /// 输入的 x/y 以及 canvas_w/canvas_h 均为 canvas CSS 像素（与页面显示尺寸一致），
+    /// 内部按页面实际尺寸（PDF 点 / OFD 像素）归一化后比较。
+    /// 命中时返回 JSON：{id, page_index, x, y, width, height, css_x, css_y, css_w, css_h, seal_info}
+    pub fn hit_test_seal(
+        &self,
+        page: u32,
+        canvas_w: f64,
+        canvas_h: f64,
+        x: f64,
+        y: f64,
+    ) -> Option<String> {
+        if canvas_w <= 0.0 || canvas_h <= 0.0 {
+            return None;
+        }
+        let page_w = self.get_page_width(page);
+        let page_h = self.get_page_height(page);
+        if page_w <= 0.0 || page_h <= 0.0 {
+            return None;
+        }
+
+        // CSS 像素 -> 页面逻辑坐标
+        let scale_x = canvas_w / page_w;
+        let scale_y = canvas_h / page_h;
+        let px = x / scale_x;
+        let py = y / scale_y;
+
+        for seal in &self.state.seals {
+            if seal.page_index != page {
+                continue;
+            }
+            let sx = seal.x;
+            let sy = seal.y;
+            let sw = seal.width;
+            let sh = seal.height;
+            if px >= sx && px <= sx + sw && py >= sy && py <= sy + sh {
+                let json = serde_json::json!({
+                    "id": seal.id,
+                    "page_index": seal.page_index,
+                    "x": seal.x,
+                    "y": seal.y,
+                    "width": seal.width,
+                    "height": seal.height,
+                    "css_x": seal.x * scale_x,
+                    "css_y": seal.y * scale_y,
+                    "css_w": seal.width * scale_x,
+                    "css_h": seal.height * scale_y,
+                    "seal_info": seal.seal_info,
+                });
+                return Some(json.to_string());
+            }
+        }
+        None
+    }
+
     /// 获取前N字节的MD5值
     pub fn get_file_md5_value(&self, param: &str) -> Result<String, String> {
         // 解析参数 "LEFT:20480" 表示读取前20480字节
@@ -554,23 +617,241 @@ impl DocumentEngine {
         self.state.is_opened = false;
     }
 
-    /// 获取下一页注释节点
-    pub fn get_next_note(&self, _node_type: &str, _index: i32, _param: &str) -> Option<String> {
-        // 用于文档结构/大纲检索
-        // 生产环境需解析 PDF/OFD 的书签结构
-        None
+    /// 获取大纲/书签节点
+    ///
+    /// 对应 OFD_Plugin.GetNextNote(nodeType, index, param) 的大纲检索语义。
+    /// 这里以 0 基 `index` 返回第 N 个大纲条目 (按文档出现顺序展开为一维列表):
+    /// - index < 0 或越界 → 返回 None
+    /// - 命中 → 返回 JSON {"index","level","title","page"}
+    ///
+    /// `node_type` 可传 "outline" / "bookmark" / 任意值, 均返回文档大纲。
+    ///
+    /// 实现: PDF 用 lopdf 的 `get_toc()` 真实遍历 /Outlines; OFD 解析 Outline.xml。
+    pub fn get_next_note(&self, _node_type: &str, index: i32, _param: &str) -> Option<String> {
+        let toc = self.build_outline_list();
+        if index < 0 {
+            return None;
+        }
+        let idx = index as usize;
+        let (level, title, page) = toc.get(idx)?;
+        let json = serde_json::json!({
+            "index": idx,
+            "level": level,
+            "title": title,
+            "page": page,
+            "total": toc.len(),
+        });
+        Some(json.to_string())
+    }
+
+    /// 构建一维大纲列表 (level, title, page)
+    fn build_outline_list(&self) -> Vec<(usize, String, u32)> {
+        match self.state.doc_type {
+            DocType::Pdf => self.pdf_outline_list(),
+            DocType::Ofd => crate::ofd_parser::extract_ofd_outline(&self.state.raw_data),
+        }
+    }
+
+    /// PDF 大纲 — 用 lopdf get_toc() 真实解析 /Outlines 树
+    fn pdf_outline_list(&self) -> Vec<(usize, String, u32)> {
+        if let Ok(pdf) = lopdf::Document::load_mem(&self.state.raw_data) {
+            if let Ok(toc) = pdf.get_toc() {
+                return toc.toc
+                    .into_iter()
+                    .map(|t| (t.level, t.title, t.page as u32))
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
+
+    /// 文本搜索
+    ///
+    /// 在文档全文检索 `text`, 返回 JSON:
+    /// {"found":bool,"query":str,"total":u32,"matches":[{"page":u32,"count":u32,"snippet":str}]}
+    ///
+    /// 实现: PDF 逐页用 lopdf 的真实文本抽取 (extract_text) 检索;
+    /// OFD 遍历 ofd_parser 解析出的文本对象检索。大小写不敏感。
+    pub fn search_text(&self, text: &str, flags: i32) -> String {
+        let query = text.trim();
+        if query.is_empty() {
+            return serde_json::json!({
+                "found": false, "query": "", "total": 0, "matches": []
+            }).to_string();
+        }
+        let case_sensitive = (flags & 1) != 0;
+        let q = if case_sensitive { query.to_string() } else { query.to_lowercase() };
+        let mut matches: Vec<serde_json::Value> = Vec::new();
+        let mut total = 0u32;
+
+        match self.state.doc_type {
+            DocType::Pdf => {
+                let page_count = self.state.page_count;
+                for p in 1..=page_count {
+                    let page_text = if let Ok(pdf) = lopdf::Document::load_mem(&self.state.raw_data) {
+                        pdf.extract_text(&[p]).unwrap_or_default()
+                    } else {
+                        continue;
+                    };
+                    let hay = if case_sensitive { page_text.clone() } else { page_text.to_lowercase() };
+                    let count = hay.matches(&q).count() as u32;
+                    if count > 0 {
+                        total += count;
+                        let snippet = make_snippet(&page_text, query, 40);
+                        matches.push(serde_json::json!({
+                            "page": p, "count": count, "snippet": snippet
+                        }));
+                    }
+                }
+            }
+            DocType::Ofd => {
+                if let Ok(ofd) = crate::ofd_parser::parse_ofd(&self.state.raw_data) {
+                    for page in &ofd.pages {
+                        let mut page_text = String::new();
+                        for obj in &page.objects {
+                            if let crate::ofd_parser::OfdObject::Text(t) = obj {
+                                for item in &t.text_items {
+                                    page_text.push_str(&item.text);
+                                }
+                            }
+                        }
+                        for annot in &page.annotations {
+                            for obj in &annot.objects {
+                                if let crate::ofd_parser::OfdObject::Text(t) = obj {
+                                    for item in &t.text_items {
+                                        page_text.push_str(&item.text);
+                                    }
+                                }
+                            }
+                        }
+                        if page_text.is_empty() { continue; }
+                        let hay = if case_sensitive { page_text.clone() } else { page_text.to_lowercase() };
+                        let count = hay.matches(&q).count() as u32;
+                        if count > 0 {
+                            total += count;
+                            let snippet = make_snippet(&page_text, query, 40);
+                            matches.push(serde_json::json!({
+                                "page": page.index + 1, "count": count, "snippet": snippet
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
+        serde_json::json!({
+            "found": total > 0,
+            "query": query,
+            "total": total,
+            "matches": matches,
+        }).to_string()
     }
 
     /// 删除指定注释（印章）
     pub fn delete_note(&mut self, note_id: &str) -> Result<i32, String> {
         if let Ok(idx) = note_id.parse::<usize>() {
             if idx < self.state.seals.len() {
-                self.state.seals.remove(idx);
+                let removed = self.state.seals.remove(idx);
                 self.state.seal_count = self.state.seals.len() as u32;
+                // 记录撤销操作
+                self.record_delete(idx, removed);
                 return Ok(1);
             }
         }
         Err(format!("未找到印章: {}", note_id))
+    }
+
+    /// 记录一次"添加印章"操作, 供撤销使用 (同时清空重做栈)
+    pub fn record_add(&mut self, index: usize, seal: PlacedSeal) {
+        self.state.undo_stack.push(SealOp::Add(index, seal));
+        self.state.redo_stack.clear();
+    }
+
+    /// 记录一次"删除印章"操作, 供撤销使用 (同时清空重做栈)
+    pub fn record_delete(&mut self, index: usize, seal: PlacedSeal) {
+        self.state.undo_stack.push(SealOp::Delete(index, seal));
+        self.state.redo_stack.clear();
+    }
+
+    /// 是否可撤销
+    pub fn can_undo(&self) -> bool {
+        !self.state.undo_stack.is_empty()
+    }
+
+    /// 是否可重做
+    pub fn can_redo(&self) -> bool {
+        !self.state.redo_stack.is_empty()
+    }
+
+    /// 撤销上一次印章增删操作
+    ///
+    /// 返回 true 表示成功撤销 (此时应触发重绘)
+    pub fn undo(&mut self) -> bool {
+        if let Some(op) = self.state.undo_stack.pop() {
+            match op {
+                SealOp::Add(i, seal) => {
+                    if i < self.state.seals.len() {
+                        self.state.seals.remove(i);
+                    }
+                    self.state.redo_stack.push(SealOp::Add(i, seal));
+                }
+                SealOp::Delete(i, seal) => {
+                    if i <= self.state.seals.len() {
+                        self.state.seals.insert(i, seal.clone());
+                    }
+                    self.state.redo_stack.push(SealOp::Delete(i, seal));
+                }
+            }
+            self.state.seal_count = self.state.seals.len() as u32;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 重做上一次被撤销的印章增删操作
+    pub fn redo(&mut self) -> bool {
+        if let Some(op) = self.state.redo_stack.pop() {
+            match op {
+                SealOp::Add(i, seal) => {
+                    if i <= self.state.seals.len() {
+                        self.state.seals.insert(i, seal.clone());
+                    }
+                    self.state.undo_stack.push(SealOp::Add(i, seal));
+                }
+                SealOp::Delete(i, seal) => {
+                    if i < self.state.seals.len() {
+                        self.state.seals.remove(i);
+                    }
+                    self.state.undo_stack.push(SealOp::Delete(i, seal));
+                }
+            }
+            self.state.seal_count = self.state.seals.len() as u32;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// 从文本中截取包含 `query` 的片段 (前后各 `context` 个字符), 用于搜索结果预览
+fn make_snippet(text: &str, query: &str, context: usize) -> String {
+    let pos = text.find(query)
+        .or_else(|| text.to_lowercase().find(&query.to_lowercase()));
+    match pos {
+        Some(p) => {
+            let start = p.saturating_sub(context);
+            let end = (p + query.len() + context).min(text.len());
+            let mut s = String::new();
+            if start > 0 { s.push_str("…"); }
+            s.push_str(&text[start..end]);
+            if end < text.len() { s.push_str("…"); }
+            s.replace('\n', " ").trim().to_string()
+        }
+        None => {
+            let end = context.saturating_mul(2).min(text.len());
+            text[..end].replace('\n', " ").trim().to_string()
+        }
     }
 }
 

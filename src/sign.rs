@@ -14,7 +14,17 @@ use crate::crypto;
 use crate::ses;
 use crate::pkcs7;
 use crate::types::*;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use web_sys::{RequestInit, RequestMode, Response, Headers};
+use wasm_bindgen::prelude::JsValue;
+use wasm_bindgen::JsCast;
+use wasm_bindgen_futures::JsFuture;
+
+/// 云签服务地址 (REPLACE_WITH_REAL_SIGN_SERVICE 接入点)
+thread_local! {
+    static CLOUD_SIGN_URL: RefCell<String> = RefCell::new(String::new());
+}
 
 /// 签名引擎 — 管理签名计算、签章合成、签名值写入
 pub struct SignEngine {
@@ -310,6 +320,81 @@ impl SignEngine {
     pub fn ukey_sign(&self, data: &str, _pin_code: &str) -> Result<String, String> {
         let sig = crypto::sm2_sign(data.as_bytes(), &[])?;
         Ok(crypto::b64_encode(&sig))
+    }
+
+    /// 云签服务地址 (由 set_cloud_sign_url 注入; 默认空)
+    pub fn set_cloud_sign_url(url: &str) {
+        CLOUD_SIGN_URL.with(|u| *u.borrow_mut() = url.to_string());
+    }
+
+    /// 真实云签 — 通过 HTTP 请求远端签名服务完成私钥运算
+    ///
+    /// 服务端收到 `{fileId, certSn, signContent, dataType, dataFormat, sealId}` 后,
+    /// 用其受保护的私钥对 signContent 签名, 返回 `{signResult, signCert, signCertSn, code}`。
+    /// signContent 通常为待签名原文 (或摘要的 hex/base64), 由前端与云端约定。
+    ///
+    /// 这是 REPLACE_WITH_REAL_SIGN_SERVICE 的真正接入点。
+    pub async fn cloud_sign_http(
+        file_id: &str,
+        cert_sn: &str,
+        sign_content: &str,
+        data_type: &str,
+        data_format: &str,
+        seal_id: &str,
+    ) -> Result<crate::sign::CloudSignResponse, String> {
+        let url = CLOUD_SIGN_URL.with(|u| u.borrow().clone());
+        if url.is_empty() {
+            return Err("云签服务地址未设置 (请先调用 set_cloud_sign_url)".to_string());
+        }
+
+        let payload = serde_json::json!({
+            "fileId": file_id,
+            "certSn": cert_sn,
+            "signContent": sign_content,
+            "dataType": data_type,
+            "dataFormat": data_format,
+            "sealId": seal_id,
+        });
+
+        let window = web_sys::window().ok_or_else(|| "无法获取 window".to_string())?;
+        let opts = RequestInit::new();
+        opts.set_method("POST");
+        opts.set_body(&JsValue::from_str(&payload.to_string()));
+        opts.set_mode(RequestMode::Cors);
+        let headers = Headers::new().map_err(|e| format!("Headers 创建失败: {:?}", e))?;
+        headers
+            .append("Content-Type", "application/json")
+            .map_err(|e| format!("设置 Header 失败: {:?}", e))?;
+        opts.set_headers(&headers);
+
+        let promise = window.fetch_with_str_and_init(&url, &opts);
+        let resp_val = JsFuture::from(promise)
+            .await
+            .map_err(|e| format!("云签请求失败: {:?}", e))?;
+        let resp: Response = resp_val
+            .dyn_into()
+            .map_err(|_| "云签响应类型错误".to_string())?;
+        let text_promise = resp
+            .text()
+            .map_err(|e| format!("读取云签响应失败: {:?}", e))?;
+        let text = JsFuture::from(text_promise)
+            .await
+            .map_err(|e| format!("云签响应文本解析失败: {:?}", e))?;
+        let text = text
+            .as_string()
+            .ok_or_else(|| "云签响应非文本".to_string())?;
+
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("云签响应 JSON 解析失败: {}", e))?;
+
+        let code = v["code"].as_i64().unwrap_or(200) as i32;
+        Ok(crate::sign::CloudSignResponse {
+            sign_result: v["signResult"].as_str().unwrap_or("").to_string(),
+            sign_cert: v["signCert"].as_str().map(String::from),
+            sign_cert_sn: v["signCertSn"].as_str().map(String::from),
+            msg: v["msg"].as_str().map(String::from),
+            code,
+        })
     }
 
     /// 获取内部错误码

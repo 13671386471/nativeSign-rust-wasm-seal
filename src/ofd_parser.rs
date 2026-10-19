@@ -1224,6 +1224,184 @@ fn parse_num_array(s: &str) -> Vec<f64> {
     s.split_whitespace().filter_map(|p| p.parse().ok()).collect()
 }
 
+/// 提取 OFD 文档大纲 (书签)
+///
+/// 对应 PDF /Outlines 的 OFD 等价物。OFD 标准将大纲保存在 `Outline.xml`
+/// (通常位于 `Doc_N/Outline.xml`), 结构为嵌套的 `<OutlineElem Title="..." PageID="...">`。
+///
+/// 返回一维展开列表 `(层级, 标题, 页码(1基))`, 出错或不存在时返回空 Vec。
+pub fn extract_ofd_outline(data: &[u8]) -> Vec<(usize, String, u32)> {
+    let cursor = Cursor::new(data.to_vec());
+    let mut archive = match zip::ZipArchive::new(cursor) {
+        Ok(a) => a,
+        Err(_) => return Vec::new(),
+    };
+
+    // 1) OFD.xml → DocRoot, 进而得到 base_dir
+    let doc_root = match find_doc_root(&mut archive) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let base_dir = parent_dir(&doc_root);
+
+    // 2) Document.xml → 有序 PageID 列表, 用于把 PageID 映射为页码(1基)
+    let page_ids = read_page_id_order(&mut archive, &doc_root);
+
+    // 3) 定位 Outline.xml (常见路径或扫描任意以 Outline.xml 结尾的条目)
+    let outline_path = {
+        let candidate = if base_dir.is_empty() {
+            "Outline.xml".to_string()
+        } else {
+            format!("{}/Outline.xml", base_dir)
+        };
+        if archive.by_name(&candidate).is_ok() {
+            candidate
+        } else {
+            // 扫描 zip 条目, 找第一个以 "Outline.xml" 结尾的
+            let mut found = None;
+            for i in 0..archive.len() {
+                if let Ok(entry) = archive.by_index(i) {
+                    let name = entry.name().to_string();
+                    if name.ends_with("Outline.xml") {
+                        found = Some(name);
+                        break;
+                    }
+                }
+            }
+            found.unwrap_or_default()
+        }
+    };
+    if outline_path.is_empty() {
+        return Vec::new();
+    }
+    let xml = match read_zip_str(&mut archive, &outline_path) {
+        Ok(x) => x,
+        Err(_) => return Vec::new(),
+    };
+
+    // 4) 解析 <OutlineElem> 树, 递归展开
+    let mut result: Vec<(usize, String, u32)> = Vec::new();
+    let mut r = Reader::from_str(&xml);
+    r.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+
+    // 用显式递归状态栈: 当前层级
+    parse_outline_elems(&mut r, &mut buf, &page_ids, 0, &mut result);
+
+    result
+}
+
+/// 读取 Document.xml 中 Pages 章节的有序 PageID
+fn read_page_id_order(
+    archive: &mut zip::ZipArchive<Cursor<Vec<u8>>>,
+    doc_root: &str,
+) -> Vec<u32> {
+    let xml = match read_zip_str(archive, doc_root) {
+        Ok(x) => x,
+        Err(_) => return Vec::new(),
+    };
+    let mut r = Reader::from_str(&xml);
+    r.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut ids: Vec<u32> = Vec::new();
+    let mut in_pages = false;
+
+    loop {
+        match r.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let tag = local_name(e.name().as_ref());
+                if tag == "Pages" {
+                    in_pages = true;
+                } else if tag == "Page" && in_pages {
+                    let decoder = r.decoder();
+                    for a in e.attributes().flatten() {
+                        if local_name(a.key.as_ref()) == "ID" {
+                            if let Some(v) = a
+                                .decode_and_unescape_value(decoder)
+                                .ok()
+                                .and_then(|c| c.to_string().parse::<u32>().ok())
+                            {
+                                ids.push(v);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                if local_name(e.name().as_ref()) == "Pages" {
+                    in_pages = false;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    ids
+}
+
+/// 递归解析 <OutlineElem> 节点 (支持嵌套子节点)
+fn parse_outline_elems(
+    r: &mut Reader<&[u8]>,
+    buf: &mut Vec<u8>,
+    page_ids: &[u32],
+    level: usize,
+    out: &mut Vec<(usize, String, u32)>,
+) {
+    loop {
+        match r.read_event_into(buf) {
+            Ok(Event::Start(ref e)) => {
+                let tag = local_name(e.name().as_ref());
+                if tag == "OutlineElem" {
+                    let title = attr_val(e, r, "Title")
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_default();
+                    let page_id = attr_val(e, r, "PageID")
+                        .and_then(|s| s.parse::<u32>().ok());
+                    let page_no = page_id
+                        .and_then(|id| page_ids.iter().position(|&x| x == id))
+                        .map(|idx| (idx + 1) as u32)
+                        .unwrap_or(0);
+                    if !title.is_empty() {
+                        out.push((level + 1, title, page_no));
+                    }
+                    // 递归处理子大纲 (子 <OutlineElem> 紧随其后, 直到对应的 </OutlineElem>)
+                    parse_outline_elems(r, buf, page_ids, level + 1, out);
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let tag = local_name(e.name().as_ref());
+                if tag == "OutlineElem" {
+                    let title = attr_val(e, r, "Title")
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_default();
+                    let page_id = attr_val(e, r, "PageID")
+                        .and_then(|s| s.parse::<u32>().ok());
+                    let page_no = page_id
+                        .and_then(|id| page_ids.iter().position(|&x| x == id))
+                        .map(|idx| (idx + 1) as u32)
+                        .unwrap_or(0);
+                    if !title.is_empty() {
+                        out.push((level + 1, title, page_no));
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let tag = local_name(e.name().as_ref());
+                if tag == "OutlineElem" {
+                    // 当前 OutlineElem 子树结束, 返回到上一层递归
+                    return;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
 fn parent_dir(path: &str) -> String {
     match path.rfind('/') {
         Some(pos) => {

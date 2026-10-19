@@ -122,6 +122,10 @@ pub struct DocState {
     pub seals: Vec<PlacedSeal>,
     /// 文档属性 key-value
     pub properties: std::collections::HashMap<String, String>,
+    /// 撤销栈 (印章增删操作)
+    pub undo_stack: Vec<SealOp>,
+    /// 重做栈
+    pub redo_stack: Vec<SealOp>,
 }
 
 impl Default for DocState {
@@ -139,6 +143,8 @@ impl Default for DocState {
             raw_data: Vec::new(),
             seals: Vec::new(),
             properties: std::collections::HashMap::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 }
@@ -155,6 +161,15 @@ pub struct PlacedSeal {
     pub seal_info: SealInfo,
     pub signature: Option<Vec<u8>>,   // 签名值
     pub signed: bool,
+}
+
+/// 撤销/重做操作记录
+#[derive(Debug, Clone)]
+pub enum SealOp {
+    /// 添加印章 (索引, 印章快照)
+    Add(usize, PlacedSeal),
+    /// 删除印章 (索引, 印章快照)
+    Delete(usize, PlacedSeal),
 }
 
 /// UKey 设备信息
