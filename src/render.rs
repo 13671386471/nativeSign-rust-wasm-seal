@@ -441,6 +441,23 @@ impl RenderEngine {
             }
         }
 
+        // 选中框: 在 canvas 像素层绘制在当前选中印章处 (空心红框)
+        if let Some(sel_id) = doc_state.selected_seal {
+            let sx_scale = bmp_w as f64 / pdf_pw;
+            let sy_scale = bmp_h as f64 / pdf_ph;
+            for seal in &doc_state.seals {
+                if seal.page_index == page_idx && seal.id == sel_id {
+                    draw_selection_rect(
+                        &ctx,
+                        seal.x * sx_scale,
+                        seal.y * sy_scale,
+                        seal.width * sx_scale,
+                        seal.height * sy_scale,
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -607,6 +624,19 @@ impl RenderEngine {
         for seal in &doc_state.seals {
             if seal.page_index == page.index {
                 self.render_seal_ofd(&ctx, seal, physical_box, scale)?;
+            }
+        }
+
+        // 选中框 (与 render_seal_ofd 使用同一坐标映射)
+        if let Some(sel_id) = doc_state.selected_seal {
+            for seal in &doc_state.seals {
+                if seal.page_index == page.index && seal.id == sel_id {
+                    let sx = (seal.x / physical_box.w) * physical_box.w;
+                    let sy = (seal.y / physical_box.h) * physical_box.h;
+                    let sw = seal.width * self.config.zoom / scale;
+                    let sh = seal.height * self.config.zoom / scale;
+                    draw_selection_rect(&ctx, sx, sy, sw, sh);
+                }
             }
         }
 
@@ -1053,6 +1083,15 @@ impl Default for RenderEngine {
 
 /// SVG 椭圆弧 → Canvas ellipse 绘制
 /// 参考 SVG 规范 https://www.w3.org/TR/SVG/implnote.html#ArcConversionCenterToEndpoint
+/// 在 canvas 上绘制"选中印章"红色方框：空心、直角、实线，像素层绘制（与原 Qt 引擎观感一致）。
+fn draw_selection_rect(ctx: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f64) {
+    let _ = ctx.save();
+    ctx.set_stroke_style_str("#FF0000");
+    ctx.set_line_width(2.0);
+    let _ = ctx.stroke_rect(x, y, w, h);
+    let _ = ctx.restore();
+}
+
 fn draw_svg_arc(
     ctx: &CanvasRenderingContext2d,
     x0: f64,

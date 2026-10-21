@@ -194,6 +194,19 @@ function createOFDPlugin(wasmModule) {
     return mod.hit_test_seal(page, canvasW, canvasH, x, y);
   }
 
+  /**
+   * 选中命中的签章（引擎内命中测试 + 设置选中态 + 重绘，选中框由渲染层画进 canvas）
+   * @returns {string|null} 命中签章 JSON，未命中返回 null
+   */
+  function SelectSealAt(page, canvasW, canvasH, x, y) {
+    return mod.select_seal_at(page, canvasW, canvasH, x, y);
+  }
+
+  /** 清除签章选中并重绘 */
+  function ClearSealSelection() {
+    return mod.clear_seal_selection();
+  }
+
   async function GetNextNote(nodeType, index, param) {
     return mod.get_next_note(nodeType, index, param);
   }
@@ -455,6 +468,8 @@ function createOFDPlugin(wasmModule) {
     getSignaturesCount,
     GetSealInfoJson,
     HitTestSeal,
+    SelectSealAt,
+    ClearSealSelection,
     GetNextNote,
     DeleteNote,
 

@@ -379,6 +379,25 @@ pub fn hit_test_seal(page: i32, canvas_w: f64, canvas_h: f64, x: f64, y: f64) ->
     with_engine(|engine| engine.doc.hit_test_seal(page as u32, canvas_w, canvas_h, x, y))
 }
 
+/// 选中命中的签章：更新引擎内选中状态并重绘（选中框由渲染层画进 canvas）。
+/// 命中返回签章 JSON，未命中则清除选中并返回 null。
+#[wasm_bindgen]
+pub fn select_seal_at(page: i32, canvas_w: f64, canvas_h: f64, x: f64, y: f64) -> Option<String> {
+    if page < 0 {
+        return None;
+    }
+    let r = with_engine(|engine| engine.doc.select_seal_at(page as u32, canvas_w, canvas_h, x, y));
+    refresh_render();
+    r
+}
+
+/// 清除当前印章选中状态并重绘（移除 canvas 上的选中框）
+#[wasm_bindgen]
+pub fn clear_seal_selection() {
+    with_engine(|engine| engine.doc.clear_seal_selection());
+    refresh_render();
+}
+
 /// 获取下一页注释节点
 #[wasm_bindgen]
 pub async fn get_next_note(node_type: &str, index: i32, param: &str) -> Option<String> {

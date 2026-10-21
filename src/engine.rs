@@ -66,6 +66,7 @@ impl DocumentEngine {
             properties: HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            selected_seal: None,
         };
 
         Ok(())
@@ -541,18 +542,16 @@ impl DocumentEngine {
         serde_json::to_string(&self.state.seals).unwrap_or_else(|_| "[]".to_string())
     }
 
-    /// 命中测试：判断点 (x,y) 是否落在第 page 页的某个签章区域内。
-    /// 输入的 x/y 以及 canvas_w/canvas_h 均为 canvas CSS 像素（与页面显示尺寸一致），
-    /// 内部按页面实际尺寸（PDF 点 / OFD 像素）归一化后比较。
-    /// 命中时返回 JSON：{id, page_index, x, y, width, height, css_x, css_y, css_w, css_h, seal_info}
-    pub fn hit_test_seal(
+    /// 计算点击命中的印章索引。返回 (索引, scale_x, scale_y)。
+    /// 输入 x/y 与 canvas_w/canvas_h 均为 canvas CSS 像素, 内部按页面逻辑尺寸归一化。
+    fn compute_seal_hit(
         &self,
         page: u32,
         canvas_w: f64,
         canvas_h: f64,
         x: f64,
         y: f64,
-    ) -> Option<String> {
+    ) -> Option<(usize, f64, f64)> {
         if canvas_w <= 0.0 || canvas_h <= 0.0 {
             return None;
         }
@@ -568,32 +567,88 @@ impl DocumentEngine {
         let px = x / scale_x;
         let py = y / scale_y;
 
-        for seal in &self.state.seals {
+        for (i, seal) in self.state.seals.iter().enumerate() {
             if seal.page_index != page {
                 continue;
             }
-            let sx = seal.x;
-            let sy = seal.y;
-            let sw = seal.width;
-            let sh = seal.height;
-            if px >= sx && px <= sx + sw && py >= sy && py <= sy + sh {
-                let json = serde_json::json!({
-                    "id": seal.id,
-                    "page_index": seal.page_index,
-                    "x": seal.x,
-                    "y": seal.y,
-                    "width": seal.width,
-                    "height": seal.height,
-                    "css_x": seal.x * scale_x,
-                    "css_y": seal.y * scale_y,
-                    "css_w": seal.width * scale_x,
-                    "css_h": seal.height * scale_y,
-                    "seal_info": seal.seal_info,
-                });
-                return Some(json.to_string());
+            if px >= seal.x && px <= seal.x + seal.width && py >= seal.y && py <= seal.y + seal.height {
+                return Some((i, scale_x, scale_y));
             }
         }
         None
+    }
+
+    /// 命中测试：判断点 (x,y) 是否落在某签章上，命中返回其 JSON（不改变选中状态）。
+    /// 返回：{id, page_index, x, y, width, height, css_x, css_y, css_w, css_h, seal_info}
+    pub fn hit_test_seal(
+        &self,
+        page: u32,
+        canvas_w: f64,
+        canvas_h: f64,
+        x: f64,
+        y: f64,
+    ) -> Option<String> {
+        let (i, scale_x, scale_y) = self.compute_seal_hit(page, canvas_w, canvas_h, x, y)?;
+        let seal = &self.state.seals[i];
+        let json = serde_json::json!({
+            "id": seal.id,
+            "page_index": seal.page_index,
+            "x": seal.x,
+            "y": seal.y,
+            "width": seal.width,
+            "height": seal.height,
+            "css_x": seal.x * scale_x,
+            "css_y": seal.y * scale_y,
+            "css_w": seal.width * scale_x,
+            "css_h": seal.height * scale_y,
+            "seal_info": seal.seal_info,
+        });
+        Some(json.to_string())
+    }
+
+    /// 选中点击命中的印章：更新 `selected_seal` 状态（渲染层据此在 canvas 上画选中框），
+    /// 命中返回该印章 JSON；未命中则清除选中并返回 None。
+    pub fn select_seal_at(
+        &mut self,
+        page: u32,
+        canvas_w: f64,
+        canvas_h: f64,
+        x: f64,
+        y: f64,
+    ) -> Option<String> {
+        match self.compute_seal_hit(page, canvas_w, canvas_h, x, y) {
+            Some((i, scale_x, scale_y)) => {
+                let (id, json) = {
+                    let seal = &self.state.seals[i];
+                    let json = serde_json::json!({
+                        "id": seal.id,
+                        "page_index": seal.page_index,
+                        "x": seal.x,
+                        "y": seal.y,
+                        "width": seal.width,
+                        "height": seal.height,
+                        "css_x": seal.x * scale_x,
+                        "css_y": seal.y * scale_y,
+                        "css_w": seal.width * scale_x,
+                        "css_h": seal.height * scale_y,
+                        "seal_info": seal.seal_info,
+                    })
+                    .to_string();
+                    (seal.id, json)
+                };
+                self.state.selected_seal = Some(id);
+                Some(json)
+            }
+            None => {
+                self.state.selected_seal = None;
+                None
+            }
+        }
+    }
+
+    /// 清除当前选中
+    pub fn clear_seal_selection(&mut self) {
+        self.state.selected_seal = None;
     }
 
     /// 获取前N字节的MD5值
@@ -763,6 +818,9 @@ impl DocumentEngine {
             if idx < self.state.seals.len() {
                 let removed = self.state.seals.remove(idx);
                 self.state.seal_count = self.state.seals.len() as u32;
+                if self.state.selected_seal == Some(removed.id) {
+                    self.state.selected_seal = None;
+                }
                 // 记录撤销操作
                 self.record_delete(idx, removed);
                 return Ok(1);

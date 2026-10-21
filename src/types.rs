@@ -128,6 +128,8 @@ pub struct DocState {
     pub undo_stack: Vec<SealOp>,
     /// 重做栈
     pub redo_stack: Vec<SealOp>,
+    /// 当前选中的印章 id (None 表示无选中); 由渲染层据此在 canvas 上绘制选中框
+    pub selected_seal: Option<usize>,
 }
 
 impl Default for DocState {
@@ -148,6 +150,7 @@ impl Default for DocState {
             properties: std::collections::HashMap::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            selected_seal: None,
         }
     }
 }

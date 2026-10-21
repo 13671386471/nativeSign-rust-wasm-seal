@@ -24,16 +24,6 @@
         #spinner .loading-icon { font-size: 48px; margin-bottom: 12px; animation: spin 1s linear infinite; }
         @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         #screen { position: relative; width: 100%; overflow: visible; background: #ccc; }
-        #sealSelectionBox {
-            position: absolute;
-            border: 2px solid #ff4d4f;
-            background: rgba(255, 77, 79, 0.08);
-            border-radius: 2px;
-            pointer-events: none;
-            z-index: 100;
-            display: none;
-            box-shadow: 0 0 0 1px rgba(255, 77, 79, 0.25);
-        }
         #status { margin-top: 8px; font-size: 13px; color: #999; }
         .info-panel { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 16px; }
         .info-card { background: white; padding: 16px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
@@ -203,9 +193,7 @@
                     <div>引擎加载中...</div>
                     <div id="status">正在加载 PDFium WASM 模块…</div>
                 </div>
-                <div id="screen">
-                    <div id="sealSelectionBox"></div>
-                </div>
+                <div id="screen"></div>
             </div>
             <!-- 字体提供器调试面板 (仅用于排查中文渲染问题) -->
             <div id="fontDebug" style="position:fixed; left:8px; bottom:8px; max-width:360px; max-height:42vh; overflow:auto; background:rgba(0,0,0,0.82); color:#9f9; font:11px/1.4 monospace; padding:8px 10px; border-radius:6px; z-index:99999; white-space:pre-wrap; display:none;"></div>
@@ -1265,13 +1253,10 @@
                 if (hitSeal) {
                     e.preventDefault();
                     __activeSeal = hitSeal;
-                    // 同时高亮签名域区域（红色选框），对齐原 dianjureader.wasm 效果
+                    // 在引擎层设置选中并重绘：红框由渲染层画进 canvas
                     const plugin = window.OFD_Plugin;
-                    if (plugin && typeof plugin.HitTestSeal === 'function') {
-                        const hitJson = plugin.HitTestSeal(pageIdx, rect.width, rect.height, clickX, clickY);
-                        if (hitJson) {
-                            try { showSealSelectionBox(canvas, JSON.parse(hitJson)); } catch (_) {}
-                        }
+                    if (plugin && typeof plugin.SelectSealAt === 'function') {
+                        plugin.SelectSealAt(pageIdx, rect.width, rect.height, clickX, clickY);
                     }
                     showContextMenu(e.clientX, e.clientY);
                 }
@@ -1285,33 +1270,25 @@
                 }
             });
 
-            // 左键点击已盖章/签名域位置 → 高亮显示签名域区域 (对齐原 dianjureader.wasm 效果)
+            // 左键点击签章 → 引擎层命中/选中并重绘红框；点空白或区域外 → 清除选中
             document.addEventListener('click', function(e) {
-                if (e.button !== 0) return; // 仅处理左键，避免右键/中键误触发
+                if (e.button !== 0) return; // 仅处理左键
 
-                // 若点的是右键菜单项，交给菜单自身的 onclick 处理，这里不显示/不隐藏选框
+                // 若点的是右键菜单项，交给菜单自身的 onclick 处理
                 const menu = document.getElementById('sealContextMenu');
                 if (menu && menu.contains(e.target)) return;
+
+                const plugin = window.OFD_Plugin;
+                if (!plugin || typeof plugin.SelectSealAt !== 'function') return;
 
                 const screen = document.getElementById('screen');
                 if (!screen) return;
 
-                // 点击落在 screen 容器之外（如工具栏）→ 隐藏选框
-                if (!screen.contains(e.target)) {
-                    hideSealSelectionBox();
-                    return;
-                }
-
-                // 命中测试需基于页面画布
-                const canvas = e.target.closest('canvas[data-page]');
-                if (!canvas) {
-                    hideSealSelectionBox();
-                    return;
-                }
-
-                const pageIdx = parseInt(canvas.getAttribute('data-page'), 10);
-                if (isNaN(pageIdx)) {
-                    hideSealSelectionBox();
+                const canvas = screen.contains(e.target) ? e.target.closest('canvas[data-page]') : null;
+                const pageIdx = canvas ? parseInt(canvas.getAttribute('data-page'), 10) : NaN;
+                if (!canvas || isNaN(pageIdx)) {
+                    // 点空白/工具栏 → 清除选中（引擎重绘去掉红框）
+                    if (typeof plugin.ClearSealSelection === 'function') plugin.ClearSealSelection();
                     return;
                 }
 
@@ -1320,54 +1297,9 @@
                 const clickX = e.clientX - rect.left;
                 const clickY = e.clientY - rect.top;
 
-                const plugin = window.OFD_Plugin;
-                if (!plugin || typeof plugin.HitTestSeal !== 'function') {
-                    hideSealSelectionBox();
-                    return;
-                }
-
-                // 传入 canvas 的 CSS 显示尺寸 (rect.width/height)，使返回的 css_* 直接是 CSS 像素
-                const hit = plugin.HitTestSeal(pageIdx, rect.width, rect.height, clickX, clickY);
-                if (hit) {
-                    try {
-                        const o = JSON.parse(hit);
-                        showSealSelectionBox(canvas, o);
-                    } catch (err) {
-                        hideSealSelectionBox();
-                    }
-                } else {
-                    hideSealSelectionBox();
-                }
+                // 传入 canvas 的 CSS 显示尺寸与点击坐标：命中则引擎设选中并重绘，未命中自动清除
+                plugin.SelectSealAt(pageIdx, rect.width, rect.height, clickX, clickY);
             });
-        }
-
-        /// 显示签名域高亮选框（红色区域），对齐原 dianjureader.wasm 效果
-        function showSealSelectionBox(canvas, o) {
-            const screen = document.getElementById('screen');
-            const box = document.getElementById('sealSelectionBox');
-            if (!screen || !box || !canvas) return;
-
-            // 选框是 #screen 的子元素（position:relative），需换算到 #screen 坐标系
-            const screenRect = screen.getBoundingClientRect();
-            const canvasRect = canvas.getBoundingClientRect();
-            const offX = canvasRect.left - screenRect.left;
-            const offY = canvasRect.top - screenRect.top;
-
-            box.style.left = (offX + o.css_x) + 'px';
-            box.style.top = (offY + o.css_y) + 'px';
-            box.style.width = o.css_w + 'px';
-            box.style.height = o.css_h + 'px';
-            box.style.display = 'block';
-
-            // 记录当前选中的签名域，便于后续联动（属性/验证面板）
-            window.__selectedSeal = o;
-        }
-
-        /// 隐藏签名域高亮选框
-        function hideSealSelectionBox() {
-            const box = document.getElementById('sealSelectionBox');
-            if (box) box.style.display = 'none';
-            window.__selectedSeal = null;
         }
 
         /// 显示右键菜单
