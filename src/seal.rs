@@ -64,16 +64,25 @@ impl SealEngine {
         let x_raw = parts[1].parse::<f64>().unwrap_or(0.0);
         let y_raw = parts[4].parse::<f64>().unwrap_or(0.0);
 
-        let x_pt = x_raw / 50000.0 * 595.0;
-        let y_pt = y_raw / 50000.0 * 842.0;
+        const SEAL_W: f64 = 120.0; // 印章宽度 (PDF 点, 约 42mm)
+        const SEAL_H: f64 = 120.0; // 印章高度
+        const PAGE_W: f64 = 595.0;
+        const PAGE_H: f64 = 842.0;
+
+        // 传进来的 x_raw/y_raw 是鼠标点击点，按"点击点 = 印章中心"换算左上角，
+        // 并夹在页面内避免印章越界。
+        let center_x = x_raw / 50000.0 * PAGE_W;
+        let center_y = y_raw / 50000.0 * PAGE_H;
+        let x_pt = (center_x - SEAL_W / 2.0).clamp(0.0, (PAGE_W - SEAL_W).max(0.0));
+        let y_pt = (center_y - SEAL_H / 2.0).clamp(0.0, (PAGE_H - SEAL_H).max(0.0));
 
         let seal = PlacedSeal {
             id: placed_seals.len(),
             page_index: page,
             x: x_pt,
             y: y_pt,
-            width: 120.0,  // 印章宽度 (PDF 点, 约 42mm)
-            height: 120.0, // 印章高度
+            width: SEAL_W,
+            height: SEAL_H,
             seal_info: seal_info.clone(),
             signature: None,
             signed: false,
