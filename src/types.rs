@@ -104,6 +104,19 @@ pub struct SealInfo {
     pub cert_data: Option<String>,
 }
 
+/// 搜索命中矩形（页面坐标系：PDF 点 / OFD mm，原点左上角）
+#[derive(Clone, Debug, Default)]
+pub struct SearchMatchRect {
+    pub page_index: u32,
+    /// 逻辑命中序号：同一处命中可能由多个矩形（跨文本段）组成，它们共享同一 hit。
+    /// "下一个/上一个"按 hit 移动，渲染时同一 hit 的所有矩形一起高亮。
+    pub hit: u32,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
 /// 文档状态
 #[derive(Debug, Clone)]
 pub struct DocState {
@@ -130,6 +143,16 @@ pub struct DocState {
     pub redo_stack: Vec<SealOp>,
     /// 当前选中的印章 id (None 表示无选中); 由渲染层据此在 canvas 上绘制选中框
     pub selected_seal: Option<usize>,
+    /// 当前搜索词
+    pub search_query: String,
+    /// 搜索命中矩形列表（按页面顺序）
+    pub search_matches: Vec<SearchMatchRect>,
+    /// 当前高亮的命中索引（导航用）
+    pub search_current: Option<usize>,
+    /// 是否标记全部命中（"全部标记"）
+    pub search_show_all: bool,
+    /// 逻辑命中总数（search_matches 是矩形列表，可能一个命中对应多个矩形）
+    pub search_hit_count: usize,
 }
 
 impl Default for DocState {
@@ -151,6 +174,11 @@ impl Default for DocState {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             selected_seal: None,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            search_current: None,
+            search_show_all: false,
+            search_hit_count: 0,
         }
     }
 }

@@ -359,6 +359,11 @@ function createOFDPlugin(wasmModule) {
     return mod.search_text(text, flags, options);
   }
 
+  /** 打开"查找"弹框（弹框/输入框/全部标记/上一个/下一个 均由 Rust 层实现） */
+  function ShowSearchDialog() {
+    return mod.show_search_dialog();
+  }
+
   function SetJSEnv(env) {
     return mod.set_js_env(env);
   }
@@ -512,6 +517,7 @@ function createOFDPlugin(wasmModule) {
     ShowDialog,
     ClosePopupMenu,
     SearchText,
+    ShowSearchDialog,
     SetJSEnv,
     SetShowToolBar,
     SetShowDefMenu,

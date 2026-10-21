@@ -41,8 +41,10 @@ mod ofd_parser;
 mod ofd_sign;
 mod font_provider;
 mod font_embed;
+mod search_ui;
 
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use web_sys;
@@ -826,6 +828,72 @@ pub fn close_popup_menu() {
 #[wasm_bindgen]
 pub async fn search_text(text: &str, flags: i32, _options: i32) -> String {
     with_engine(|engine| engine.doc.search_text(text, flags))
+}
+
+/// 打开"查找"弹框：弹框、输入框、全部标记/上一个/下一个按钮均由 Rust 层构建与管理。
+#[wasm_bindgen]
+pub fn show_search_dialog() -> Result<(), JsValue> {
+    search_ui::show()
+}
+
+/// 执行搜索并按需标记全部命中；返回 (命中数, 当前命中页)
+pub(crate) fn search_run(query: &str, show_all: bool) -> (usize, Option<u32>) {
+    let (n, page) = with_engine(|e| {
+        let n = e.doc.search_compute(query);
+        if show_all {
+            e.doc.search_show_all();
+        }
+        let page = e.doc.state.search_current.and_then(|h| {
+            e.doc
+                .state
+                .search_matches
+                .iter()
+                .find(|m| m.hit as usize == h)
+                .map(|m| m.page_index)
+        });
+        (n, page)
+    });
+    refresh_render();
+    if let Some(p) = page {
+        scroll_to_page_element(p);
+    }
+    (n, page)
+}
+
+/// 上一个/下一个命中；若查询词变化则先重新计算。返回 (命中数, 当前索引, 当前页)
+pub(crate) fn search_step(forward: bool, query: &str) -> (usize, Option<usize>, Option<u32>) {
+    let (n, cur, page) = with_engine(|e| {
+        if e.doc.state.search_query != query.trim() {
+            e.doc.search_compute(query);
+        }
+        let page = if forward { e.doc.search_next() } else { e.doc.search_prev() };
+        (e.doc.state.search_hit_count, e.doc.state.search_current, page)
+    });
+    refresh_render();
+    if let Some(p) = page {
+        scroll_to_page_element(p);
+    }
+    (n, cur, page)
+}
+
+/// 清除搜索状态（移除所有标记）
+pub(crate) fn search_clear() {
+    with_engine(|e| e.doc.clear_search());
+    refresh_render();
+}
+
+/// 滚动到指定页 canvas
+pub(crate) fn scroll_to_page_element(page_idx: u32) {
+    if let Some(win) = web_sys::window() {
+        if let Some(doc) = win.document() {
+            let id = format!("__pg_screen_p{}", page_idx);
+            if let Some(el) = doc.get_element_by_id(&id) {
+                if let Ok(he) = el.dyn_into::<web_sys::HtmlElement>() {
+                    let _ = he.scroll_into_view_with_bool(true);
+                }
+            }
+        }
+    }
 }
 
 /// 设置 JS 环境变量

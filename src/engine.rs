@@ -67,6 +67,11 @@ impl DocumentEngine {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             selected_seal: None,
+            search_query: String::new(),
+            search_matches: Vec::new(),
+            search_current: None,
+            search_show_all: false,
+            search_hit_count: 0,
         };
 
         Ok(())
@@ -810,6 +815,137 @@ impl DocumentEngine {
             "total": total,
             "matches": matches,
         }).to_string()
+    }
+
+    /// 计算搜索命中矩形（用于"全部标记/下一个/上一个"），返回命中数。
+    /// PDF 用 PDFium 文本搜索取精确矩形；OFD 依据文本项位置估算。
+    pub fn search_compute(&mut self, query: &str) -> usize {
+        let q = query.trim().to_string();
+        self.state.search_query = q.clone();
+        self.state.search_matches.clear();
+        self.state.search_current = None;
+        self.state.search_show_all = false;
+        if q.is_empty() {
+            return 0;
+        }
+
+        match self.state.doc_type {
+            DocType::Pdf => {
+                let data: &[u8] = if !self.state.original_data.is_empty() {
+                    &self.state.original_data
+                } else {
+                    &self.state.raw_data
+                };
+                let mut hits = crate::render::find_pdf_text_hits(data, &q);
+                if hits.is_empty() {
+                    // 原始字节搜不到时回退到字体嵌入后的字节
+                    hits = crate::render::find_pdf_text_hits(&self.state.raw_data, &q);
+                }
+                let mut hit_idx = 0u32;
+                for (p, rects) in hits {
+                    for (x, y, w, h) in rects {
+                        self.state.search_matches.push(SearchMatchRect {
+                            page_index: p,
+                            hit: hit_idx,
+                            x,
+                            y,
+                            w,
+                            h,
+                        });
+                    }
+                    hit_idx += 1;
+                }
+                self.state.search_hit_count = hit_idx as usize;
+            }
+            DocType::Ofd => {
+                if let Ok(ofd) = crate::ofd_parser::parse_ofd(&self.state.raw_data) {
+                    let qchars: Vec<char> = q.chars().collect();
+                    let qlen = qchars.len();
+                    let mut hit_idx = 0u32;
+                    if qlen > 0 {
+                        for page in &ofd.pages {
+                            for obj in &page.objects {
+                                if let crate::ofd_parser::OfdObject::Text(t) = obj {
+                                    let fs = t.font_size.max(1.0);
+                                    for item in &t.text_items {
+                                        let chars: Vec<char> = item.text.chars().collect();
+                                        let mut i = 0usize;
+                                        while i + qlen <= chars.len() {
+                                            if chars[i..i + qlen] == qchars[..] {
+                                                self.state.search_matches.push(SearchMatchRect {
+                                                    page_index: page.index,
+                                                    hit: hit_idx,
+                                                    x: item.x + (i as f64) * fs,
+                                                    y: item.y - fs,
+                                                    w: (qlen as f64) * fs,
+                                                    h: fs,
+                                                });
+                                                hit_idx += 1;
+                                                i += qlen;
+                                            } else {
+                                                i += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.state.search_hit_count = hit_idx as usize;
+                }
+            }
+        }
+
+        if self.state.search_hit_count > 0 {
+            self.state.search_current = Some(0);
+        }
+        self.state.search_hit_count
+    }
+
+    /// 标记全部命中
+    pub fn search_show_all(&mut self) {
+        self.state.search_show_all = true;
+    }
+
+    /// 下一个命中，返回所在页码
+    pub fn search_next(&mut self) -> Option<u32> {
+        let n = self.state.search_hit_count;
+        if n == 0 {
+            return None;
+        }
+        let cur = self.state.search_current.unwrap_or(0);
+        let next = (cur + 1) % n;
+        self.state.search_current = Some(next);
+        self.state
+            .search_matches
+            .iter()
+            .find(|m| m.hit as usize == next)
+            .map(|m| m.page_index)
+    }
+
+    /// 上一个命中，返回所在页码
+    pub fn search_prev(&mut self) -> Option<u32> {
+        let n = self.state.search_hit_count;
+        if n == 0 {
+            return None;
+        }
+        let cur = self.state.search_current.unwrap_or(0);
+        let prev = (cur + n - 1) % n;
+        self.state.search_current = Some(prev);
+        self.state
+            .search_matches
+            .iter()
+            .find(|m| m.hit as usize == prev)
+            .map(|m| m.page_index)
+    }
+
+    /// 清除搜索状态
+    pub fn clear_search(&mut self) {
+        self.state.search_query.clear();
+        self.state.search_matches.clear();
+        self.state.search_current = None;
+        self.state.search_show_all = false;
+        self.state.search_hit_count = 0;
     }
 
     /// 删除指定注释（印章）

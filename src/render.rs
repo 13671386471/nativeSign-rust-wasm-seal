@@ -38,6 +38,54 @@ fn get_pdfium() -> Result<&'static Pdfium, JsValue> {
     }
 }
 
+/// 用 PDFium 文本搜索获取命中。
+/// 每一次命中返回 (page_index, 该命中的矩形列表)，坐标已转成页面坐标（点，原点左上）。
+/// 注意：一处命中可能由多个文本段矩形组成（例如"甲""方"分属不同文本段），
+/// 不能把每个矩形当成一次独立命中，否则"下一个/上一个"会只高亮其中一个字。
+pub(crate) fn find_pdf_text_hits(raw: &[u8], query: &str) -> Vec<(u32, Vec<(f64, f64, f64, f64)>)> {
+    let mut out: Vec<(u32, Vec<(f64, f64, f64, f64)>)> = Vec::new();
+    if query.is_empty() {
+        return out;
+    }
+    let pdfium = match get_pdfium() {
+        Ok(p) => p,
+        Err(_) => return out,
+    };
+    let doc = match pdfium.load_pdf_from_byte_vec(raw.to_vec(), None) {
+        Ok(d) => d,
+        Err(_) => return out,
+    };
+    let options = PdfSearchOptions::new();
+    for (i, page) in doc.pages().iter().enumerate() {
+        let page_h = page.height().value as f64;
+        let text = match page.text() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let search = match text.search(query, &options) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        while let Some(segments) = search.find_next() {
+            let mut rects: Vec<(f64, f64, f64, f64)> = Vec::new();
+            for seg in segments.iter() {
+                let r = seg.bounds();
+                let left = r.left().value as f64;
+                let top = r.top().value as f64;
+                let right = r.right().value as f64;
+                let bottom = r.bottom().value as f64;
+                let w = (right - left).max(1.0);
+                let h = (top - bottom).max(1.0);
+                rects.push((left, page_h - top, w, h));
+            }
+            if !rects.is_empty() {
+                out.push((i as u32, rects));
+            }
+        }
+    }
+    out
+}
+
 // ============================================================
 // 渲染引擎配置
 // ============================================================
@@ -441,6 +489,28 @@ impl RenderEngine {
             }
         }
 
+        // 搜索命中标记: 全部标记(黄色) + 当前命中(橙色)
+        if !doc_state.search_matches.is_empty() {
+            let sx_scale = bmp_w as f64 / pdf_pw;
+            let sy_scale = bmp_h as f64 / pdf_ph;
+            for m in doc_state.search_matches.iter() {
+                if m.page_index != page_idx {
+                    continue;
+                }
+                let is_current = doc_state.search_current == Some(m.hit as usize);
+                if !is_current && !doc_state.search_show_all {
+                    continue;
+                }
+                ctx.set_fill_style_str(if is_current { "rgba(255,150,0,0.45)" } else { "rgba(255,235,0,0.35)" });
+                ctx.fill_rect(m.x * sx_scale, m.y * sy_scale, m.w * sx_scale, m.h * sy_scale);
+                if is_current {
+                    ctx.set_stroke_style_str("#FF8C00");
+                    ctx.set_line_width(1.5);
+                    let _ = ctx.stroke_rect(m.x * sx_scale, m.y * sy_scale, m.w * sx_scale, m.h * sy_scale);
+                }
+            }
+        }
+
         // 选中框: 在 canvas 像素层绘制在当前选中印章处 (空心红框)
         if let Some(sel_id) = doc_state.selected_seal {
             let sx_scale = bmp_w as f64 / pdf_pw;
@@ -617,6 +687,26 @@ impl RenderEngine {
 
         web_sys::console::log_1(&format!("[render] page[{}] rendered {} objects + {} annotations",
             page.index, rendered, page.annotations.len()).into());
+
+        // 搜索命中标记 (mm 坐标, 当前 ctx 已按 scale 缩放)
+        if !doc_state.search_matches.is_empty() {
+            for m in doc_state.search_matches.iter() {
+                if m.page_index != page.index {
+                    continue;
+                }
+                let is_current = doc_state.search_current == Some(m.hit as usize);
+                if !is_current && !doc_state.search_show_all {
+                    continue;
+                }
+                ctx.set_fill_style_str(if is_current { "rgba(255,150,0,0.45)" } else { "rgba(255,235,0,0.35)" });
+                ctx.fill_rect(m.x, m.y, m.w, m.h);
+                if is_current {
+                    ctx.set_stroke_style_str("#FF8C00");
+                    ctx.set_line_width(1.5);
+                    let _ = ctx.stroke_rect(m.x, m.y, m.w, m.h);
+                }
+            }
+        }
 
         ctx.restore();
 
